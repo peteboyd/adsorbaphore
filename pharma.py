@@ -4,7 +4,10 @@ import os
 import sys
 import pickle
 import itertools
+import networkx as nx
+import matplotlib.pyplot as plt
 import numpy as np
+from random import shuffle
 from matplotlib import pyplot
 from scipy.spatial import distance
 from math import pi
@@ -49,12 +52,70 @@ class MOFDiscovery(object):
         """
         return dir.startswith(self.mof_def) and not dir.endswith("_absl")
 
+class Tree(object):
+    """Tree creates a pairwise iteration technique for pairing and narrowing
+    down large datasets.  This will pair active sites, which will then
+    be reduced to a pharmacophore, to be subsequently paired.
+    
+    """
+
+    def __init__(self):
+        """Include a plot of the tree to see which nodes got paired to which."""
+        self.nodes = []
+        self.names = []
+
+    def add(self, name, val):
+        self.names.append(name)
+        self.nodes.append(val)
+
+    def random_pairings(self, iterable):
+        """Pair the elements in the list of nodes using the 
+        Fisher-Yates algorithm.
+        
+        """
+        l = [i for i in range(len(iterable)) if i%2 == 1] # odd
+        q = [j for j in range(len(iterable)) if j%2 == 0] # even
+        shuffle(l)
+        shuffle(q)
+        return itertools.izip_longest(l, q)
+
+    def branchify(self, nodelist):
+        if len(nodelist) > 1:
+            newlist = list(self.random_pairings(nodelist))
+            return newlist
+
+    def branchifyd(self):
+        """recursive and exhaustive random pairing until the root node is reached."""
+        # take all the nodes and names, pair them to yield new nodes and names,
+        # then recurse until there is only one node/name.
+        G = nx.DiGraph()
+        for n1, n2 in self.random_pairings(self.nodes):
+            if n1 is None:
+                G.add_node(self.names[n2])
+            elif n2 is None:
+                G.add_node(self.names[n2])
+            else:
+                G.add_edge(self.names[n1], self.names[n2])
+
+        F = nx.DiGraph()
+        for u, v in G.edges():
+            vals, distances = nx.bellman_ford(G, u)
+            if min(distances.values()) < 2:
+                for u, v in vals.items():
+                    if v:
+                        F.add_edge(v, u)
+
+        nx.draw(F)
+        plt.show()
+
+
 class BindingSiteDiscovery(object):
     """Looks for binding site analysis, searches for check_dlpoly.out,
     associates binding site.? to the order in check_dlpoly.out. Thus
     matching energies.
 
     ***Currently calibrated for CO2 runs only***
+   
     """
 
     def __init__(self, mofdir, temp=298.0, press=0.15):
@@ -153,8 +214,7 @@ class Pharmacophore(object):
         self.site_count = 0
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
         self._radii = radii # radii to scan for active site atoms
-        self.main_pharma = None
-
+        self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
     @property
     def radii(self):
         return self._radii
@@ -186,77 +246,108 @@ class Pharmacophore(object):
         self.site_count += 1
         self._active_sites.setdefault(name, []).append(activesite)
 
-    def run_pharma(self):
-        """Run graph recognition algorithm to find the clique."""
-        actives, new_cliques, track_o_graph = [], [], []
+    def get_clique(self, g1, g2, tol):
+        """Returns the atoms in g1 which constitute a maximal clique
+        with respect to g2 and a given tolerance.
+
+        """
+        cg = CorrGraph(sub_graph=g1)
+        cg.pair_graph = g2
+        cg.correspondence_api(tol=tol)
+        mc = cg.extract_clique()
+        clique = mc.next()
+        return clique
+
+    def failed_pair(self, nameset1, nameset2):
+        for i,j in itertools.product(nameset1, nameset2):
+            if tuple(sorted([i,j])) in self._bad_pair.keys():
+                return True
+        return False
+
+    def add_bad_pair(self, nameset1, nameset2):
+        """assume that all individuals will not form a valid bond here."""
+        for i,j in itertools.product(nameset1, nameset2):
+            bad_pair = tuple(sorted([i,j]))
+            self._bad_pair.setdefault(bad_pair, 0)
+            self._bad_pair[bad_pair] += 1
+
+    def run_pharma_tree(self, min_cutoff=9, tol=0.4):
+        """Take all active sites and join them randomly. This is a breadth
+        first reverse-tree algorithm."""
+        done = False
+        tree = Tree()
+        # collect all the active sites in nodes.. this is depreciated.
         for key, val in self._active_sites.items():
-            actives += val
-        # create all pairs to compare active sites
-        pairs = itertools.combinations(range(self.site_count), 2)
-        print "size of active sites", len(actives)
-        # PETE - A ROUND ROBIN HERE WHERE ALL PAIRS ARE THEN PAIRED ETC, UNTIL ALL PHARMA
-        # ARE FOUND, NEED TO CATCH ONES WHICH DON'T MAKE IT TO THE END OF THE LOOP
-        # DOES THIS GUARANTEE ALL CLIQUES > 4?
-        # I DON'T THINK A ROUND-ROBIN IS NECESSARY, JUST ONE LOOP SHOULD DO?
-        for outter in range(len(actives)):
-            g1 = actives[outter]
-            for inner in range(outter+1, len(actives)):
-                g2 = actives[inner]
-                cg = CorrGraph(sub_graph=g1)
-                cg.pair_graph = g2
-                cg.correspondence_api(tol=0.4)
-                mc = cg.extract_clique()
-                clique = mc.next()
-                if clique > 4:
-                    g1 = g1 % clique
-                    print g1.elements
-                    print g1._coordinates
-                else:
-                    cg = CorrGraph(sub_graph=actives[outter])
-                    cg.pair_graph = g2
-                    cg.correspondence_api(tol=0.4)
-                    mc = cg.extract_clique()
-                    clique = mc.next()
-                    if clique > 4:
-                        g1 = g1 % clique
-                    else:
-                        pass
-            sys.exit()
-
-
+            for c, j in enumerate(val):
+                name = key + ".%i"%(c)
+                tree.add(name, j)
+        pairings = tree.branchify(tree.nodes) # initial pairing up of active sites
+        nodes = tree.nodes   # initial arrays of nodes
+        names = [[i] for i in tree.names] # initial list of lists of names
+        pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
         while not done:
-            try:
-                i1, i2 = pairs.next()
-                g1, g2 = actives[i1], actives[i2]
-                cg = CorrGraph(sub_graph=g1)
-                cg.pair_graph = g2
-                cg.correspondence_api(tol=0.01)
-                mc = cg.extract_clique()
-                # just take the first hit
-                clique = mc.next()
-                if len(clique) > 3:
-                    sub_g = g1 % clique
-                    new_cliques.append(sub_g)
-                else:
-                    if i1 not in track_o_graph:
-                        new_cliques.append(g1)
-                        track_o_graph.append(i1)
-                    if i2 not in track_o_graph:
-                        new_cliques.append(g2)
-                        track_o_graph.append(i2)
+            # loop over pairings, each successive pairing should narrow down the active sites
+            newnodes, newnames = [], []
+            no_pairs = 0
+            for (i, j) in pairings:
+                # check if the pair has already been tried, and failed.
+                if (i is not None)and(j is not None)and(
+                        self.failed_pair(names[i], names[j])):
+                    g1, g2 = nodes[i], nodes[j]
+                    newnodes.append(g1)
+                    newnodes.append(g2)
+                    newnames.append(names[i])
+                    newnames.append(names[j])
+                    no_pairs += 1
+                    continue
 
-            except StopIteration:
-                if not new_cliques:
-                    done = True
-                else:
-                    actives = new_cliques
-                    print "size of active sites", len(actives)
-                    new_cliques = []
-                    track_o_graph = []
-                    pairs = itertools.combinations(range(len(actives)), 2)
+                # else: continue with the pharmacophore generation
+                if i is not None and j is not None:
+                    g1, g2 = nodes[i], nodes[j]
+                    p = self.get_clique(g1, g2, tol)
+                    # check if the clique is greater than the number of
+                    # atoms according to min_cutoff
+                    if len(p) >= min_cutoff:
+                        (g1 % p).debug("Pharma")
+                        newnodes.append( g1 % p )
+                        newname = names[i] + names[j]
+                        newnames.append(newname)
+                    
+                    # append to the bad_pair dictionary otherwise
+                    else:
+                        self.add_bad_pair(names[i], names[j])
+                        newnodes.append(g1)
+                        newnodes.append(g2)
+                        newnames.append(names[i])
+                        newnames.append(names[j])
 
+                # in cases where the number of active sites is odd,
+                # the itertools function will produce a pair that has
+                # (int, None). This is to account for that.
+                elif i is None:
+                    newnodes.append( nodes[j] )
+                    newnames.append( names[j] )
+                    no_pairs += 1
+                elif j is None:
+                    newnodes.append( nodes[i] )
+                    newnames.append( names[i] )
+                    no_pairs += 1
+            
+            # count the number of times no pairings were made due to 
+            # all the entries being in the _bad_pair dictionary
+            if no_pairs == len(pairings):
+                pass_count += 1
 
+            # pass count was hard-coded to 9 for some reason.. I don't even
+            # think it needs to be this high.
+            if len(newnodes) <= 1 or pass_count == 9:
+                print [len(i) for i in names]
+                done = True
 
+            else:
+                nodes = newnodes[:]
+                names = newnames[:]
+                pairings = tree.branchify(range(len(nodes)))
 
 class PairDistFn(object):
     """Creates all radial distributions from a set of binding sites to
@@ -384,31 +475,50 @@ def main():
         filename="%s_rdf.%s.csv"%(label, "O")
         write_rdf_file(filename, hist, RDF.dr)
 
+def site_xyz(dic):
+    f = open("binding_site.xyz", "w")
+    f.writelines("%i\n"%(len(dic.keys())))
+    f.writelines("binding site\n")
+    for key, val in dic.items():
+        f.writelines("%s %9.4f %9.4f %9.4f\n"%(key[:1], val[0], val[1], val[2]))
+    f.close()
+
 def main_pharma():
     _MOF_STRING = "./"
     pharma = Pharmacophore()
     pharma.radii = 4.5 
     directory = MOFDiscovery(_MOF_STRING)
+    count = 0
     for mof, path in directory.dir_scan():
         print mof
+        if count == 10:
+            break
         faps_mof = Structure(name=mof)
         faps_mof.from_cif(os.path.join(path, mof+".cif"))
         faps_graph = pharma.get_main_graph(faps_mof)
-
         binding_sites = BindingSiteDiscovery(path)
         if binding_sites.absl_calc_exists():
             binding_sites.co2_xyz_parser()
             binding_sites.energy_parser()
             for site in binding_sites.sites:
-                if site['electrostatic'] + site['vanderwaals'] < -30.:
+                el = site.pop('electrostatic')
+                vdw = site.pop('vanderwaals')
+                if el + vdw < -30.:
                     coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
                     active_site = pharma.get_active_site(coords, faps_graph)
                     # set all elements to C so that the graph matching is non-discriminatory
                     #active_site.set_elem_to_C()
                     pharma.store_active_site(active_site, name=mof)
-        break
-    pharma.run_pharma()
-    print "number of sites to evaluate", pharma.site_count
+                    #if count == 2:
+                    #    shift = site['C']
+                    #    site['C'] = site['C'] - shift
+                    #    site['O1'] = site['O1'] - shift
+                    #    site['O2'] = site['O2'] - shift
+                    #    #site_xyz(site)
+                    #    #active_site.debug("active_site")
+        count+=1
+    #pharma.run_pharma()
+    pharma.run_pharma_tree()
 if __name__ == "__main__":
     main_pharma()
     #main()
