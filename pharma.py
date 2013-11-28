@@ -3,12 +3,13 @@
 import os
 import sys
 import pickle
+import math
 import itertools
 import networkx as nx
+from time import time
 import matplotlib.pyplot as plt
 import numpy as np
 from random import shuffle
-from matplotlib import pyplot
 from scipy.spatial import distance
 from math import pi
 from nets import Net
@@ -16,6 +17,17 @@ from sub_graphs import SubGraph
 from correspondence_graphs import CorrGraph
 from faps import Structure
 from uuid import uuid4
+global rank, size, comm
+rank, size, comm = 0, 0, None
+try:
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+except ImportError:
+    print "Warning! no module named mpi4py found, I hope you are not running this in parallel!"
+    pass
 
 """
 Designed to compute RDFs.  Read in binding site xyz, and associated energy.  Compute distances to functional groups.
@@ -84,29 +96,29 @@ class Tree(object):
             newlist = list(self.random_pairings(nodelist))
             return newlist
 
-    def branchifyd(self):
-        """recursive and exhaustive random pairing until the root node is reached."""
-        # take all the nodes and names, pair them to yield new nodes and names,
-        # then recurse until there is only one node/name.
-        G = nx.DiGraph()
-        for n1, n2 in self.random_pairings(self.nodes):
-            if n1 is None:
-                G.add_node(self.names[n2])
-            elif n2 is None:
-                G.add_node(self.names[n2])
-            else:
-                G.add_edge(self.names[n1], self.names[n2])
+    #def branchifyd(self):
+    #    """recursive and exhaustive random pairing until the root node is reached."""
+    #    # take all the nodes and names, pair them to yield new nodes and names,
+    #    # then recurse until there is only one node/name.
+    #    G = nx.DiGraph()
+    #    for n1, n2 in self.random_pairings(self.nodes):
+    #        if n1 is None:
+    #            G.add_node(self.names[n2])
+    #        elif n2 is None:
+    #            G.add_node(self.names[n2])
+    #        else:
+    #            G.add_edge(self.names[n1], self.names[n2])
 
-        F = nx.DiGraph()
-        for u, v in G.edges():
-            vals, distances = nx.bellman_ford(G, u)
-            if min(distances.values()) < 2:
-                for u, v in vals.items():
-                    if v:
-                        F.add_edge(v, u)
+    #    F = nx.DiGraph()
+    #    for u, v in G.edges():
+    #        vals, distances = nx.bellman_ford(G, u)
+    #        if min(distances.values()) < 2:
+    #            for u, v in vals.items():
+    #                if v:
+    #                    F.add_edge(v, u)
 
-        nx.draw(F)
-        plt.show()
+    #    nx.draw(F)
+    #    plt.show()
 
 
 class BindingSiteDiscovery(object):
@@ -215,6 +227,10 @@ class Pharmacophore(object):
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
         self._radii = radii # radii to scan for active site atoms
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
+        self.max_pass_count = 9
+        self.min_atom_cutoff = 9
+        self.time = 0.
+
     @property
     def radii(self):
         return self._radii
@@ -264,17 +280,87 @@ class Pharmacophore(object):
                 return True
         return False
 
-    def add_bad_pair(self, nameset1, nameset2):
+    def get_bad_pairs(self, nameset1, nameset2):
         """assume that all individuals will not form a valid bond here."""
+        bb = []
         for i,j in itertools.product(nameset1, nameset2):
             bad_pair = tuple(sorted([i,j]))
+            bb.append(bad_pair)
+        return bb
+
+    def add_bad_pairs(self, pairs):
+        for bad_pair in pairs:
             self._bad_pair.setdefault(bad_pair, 0)
             self._bad_pair[bad_pair] += 1
 
-    def run_pharma_tree(self, min_cutoff=9, tol=0.4):
+    def score(self):
+        """Rank the subsequent binding sites based on their degree
+        of diversity (metal count, organic count, fgroup count, number
+        of sites included, number of MOFs included, average binding 
+        energy, variation in binding energy.
+
+        """
+        pass
+
+    def combine_pairs(self, pairings, nodes, names, tol):
+        """Combining pairs of active sites"""
+        no_pairs = 0
+        newnodes, newnames, new_bads = [], [], []
+        for (i, j) in pairings:
+            # check if the pair has already been tried, and failed.
+            if (i is not None)and(j is not None)and(
+                    self.failed_pair(names[i], names[j])):
+                g1, g2 = nodes[i], nodes[j]
+                newnodes.append(g1)
+                newnodes.append(g2)
+                newnames.append(names[i])
+                newnames.append(names[j])
+                no_pairs += 1
+                continue
+            # else: continue with the pharmacophore generation
+            if i is not None and j is not None:
+                g1, g2 = nodes[i], nodes[j]
+                p = self.get_clique(g1, g2, tol)
+                # check if the clique is greater than the number of
+                # atoms according to min_cutoff
+                if len(p) >= self.min_atom_cutoff:
+                    (g1 % p).debug("Pharma")
+                    newnodes.append( g1 % p )
+                    newname = names[i] + names[j]
+                    newnames.append(newname)
+                
+                # append to the bad_pair dictionary otherwise
+                else:
+                    new_bads += self.get_bad_pairs(names[i], names[j])
+                    newnodes.append(g1)
+                    newnodes.append(g2)
+                    newnames.append(names[i])
+                    newnames.append(names[j])
+
+            # in cases where the number of active sites is odd,
+            # the itertools function will produce a pair that has
+            # (int, None). This is to account for that.
+            # mpi routines will sometimes send (None, None)'s if 
+            # the number of nodes is greater than the number of pairs
+            # to compute.. 
+            elif i is None and j is None:
+                continue
+            elif i is None:
+                newnodes.append( nodes[j] )
+                newnames.append( names[j] )
+                no_pairs += 1
+            elif j is None:
+                newnodes.append( nodes[i] )
+                newnames.append( names[i] )
+                no_pairs += 1
+
+        return newnodes, newnames, no_pairs, new_bads 
+
+    def run_pharma_tree(self, tol=0.4):
         """Take all active sites and join them randomly. This is a breadth
         first reverse-tree algorithm."""
         done = False
+        t1 = time()
         tree = Tree()
         # collect all the active sites in nodes.. this is depreciated.
         for key, val in self._active_sites.items():
@@ -287,67 +373,98 @@ class Pharmacophore(object):
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
         while not done:
             # loop over pairings, each successive pairing should narrow down the active sites
-            newnodes, newnames = [], []
-            no_pairs = 0
-            for (i, j) in pairings:
-                # check if the pair has already been tried, and failed.
-                if (i is not None)and(j is not None)and(
-                        self.failed_pair(names[i], names[j])):
-                    g1, g2 = nodes[i], nodes[j]
-                    newnodes.append(g1)
-                    newnodes.append(g2)
-                    newnames.append(names[i])
-                    newnames.append(names[j])
-                    no_pairs += 1
-                    continue
-
-                # else: continue with the pharmacophore generation
-                if i is not None and j is not None:
-                    g1, g2 = nodes[i], nodes[j]
-                    p = self.get_clique(g1, g2, tol)
-                    # check if the clique is greater than the number of
-                    # atoms according to min_cutoff
-                    if len(p) >= min_cutoff:
-                        (g1 % p).debug("Pharma")
-                        newnodes.append( g1 % p )
-                        newname = names[i] + names[j]
-                        newnames.append(newname)
-                    
-                    # append to the bad_pair dictionary otherwise
-                    else:
-                        self.add_bad_pair(names[i], names[j])
-                        newnodes.append(g1)
-                        newnodes.append(g2)
-                        newnames.append(names[i])
-                        newnames.append(names[j])
-
-                # in cases where the number of active sites is odd,
-                # the itertools function will produce a pair that has
-                # (int, None). This is to account for that.
-                elif i is None:
-                    newnodes.append( nodes[j] )
-                    newnames.append( names[j] )
-                    no_pairs += 1
-                elif j is None:
-                    newnodes.append( nodes[i] )
-                    newnames.append( names[i] )
-                    no_pairs += 1
-            
+            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names, tol)
+            # this is a work-around for the mpi version, this was originally in the routine above
+            # but now this dictionary needs to be broadcast to all nodes.
+            self.add_bad_pairs(new_bad)
             # count the number of times no pairings were made due to 
             # all the entries being in the _bad_pair dictionary
             if no_pairs == len(pairings):
                 pass_count += 1
-
             # pass count was hard-coded to 9 for some reason.. I don't even
             # think it needs to be this high.
-            if len(newnodes) <= 1 or pass_count == 9:
-                print [len(i) for i in names]
+            if len(newnodes) <= 1 or pass_count == self.max_pass_count:
+                #print [len(i) for i in names]
                 done = True
 
             else:
                 nodes = newnodes[:]
                 names = newnames[:]
                 pairings = tree.branchify(range(len(nodes)))
+        t2 = time()
+        self.time = t2 - t1
+
+class MPIPharmacophore(Pharmacophore):
+
+    def chunks(self, l, n):
+        """yield successive n-sized chunks from l."""
+        for i in xrange(0, len(l), n):
+            yield l[i:i+n]
+
+    def run_pharma_tree(self, tol=0.4):
+        """Take all active sites and join them randomly. This is a breadth
+        first reverse-tree algorithm."""
+        
+        t1 = time()
+        done = False
+        tree = Tree()
+        # collect all the active sites in nodes.. this is depreciated.
+        for key, val in self._active_sites.items():
+            for c, j in enumerate(val):
+                name = key + ".%i"%(c)
+                tree.add(name, j)
+        pairings = tree.branchify(tree.nodes) # initial pairing up of active sites
+        nodes = tree.nodes   # initial arrays of nodes
+        names = [[i] for i in tree.names] # initial list of lists of names
+
+        pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
+        while not done:
+            # loop over pairings, each successive pairing should narrow down the active sites
+            # broadcast the pairing to the nodes.
+            chunks = None
+            # Some MPI stuff
+            if rank == 0:
+                chunks = []
+                sz = int(math.ceil(float(len(list(pairings)))/ float(size)))
+                if sz == 0:
+                    sz = 1
+                for i in self.chunks(pairings, sz):
+                    chunks.append(i)
+                # shitty hack for making the last node do nothing
+                for i in range(size-len(chunks)):
+                    chunks.append([(None,None)])
+            pairings = comm.scatter(chunks, root=0)
+            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names, tol)
+            # make sure each node has the same self.bad_pairings
+            new_bad = [i for j in comm.allgather(new_bad) for i in j]
+            # this is a work-around for the mpi version, this was originally in the routine above
+            # but now this dictionary needs to be broadcast to all nodes.
+            self.add_bad_pairs(new_bad)
+            # collect the pairings.
+            newnodes = comm.gather(newnodes, root=0)
+            newnames = comm.gather(newnames, root=0)
+            no_pairs = comm.gather(no_pairs, root=0)
+            if rank == 0:
+                no_pairs = sum(no_pairs)
+                newnodes = [j for i in newnodes for j in i]
+                newnames = [j for i in newnames for j in i]
+
+                if no_pairs == len(pairings):
+                    pass_count += 1
+
+                # pass count was hard-coded to 9 for some reason.. I don't 
+                # think it needs to be this high.
+                if len(newnodes) <= 1 or pass_count == self.max_pass_count:
+                    #print [len(i) for i in names]
+                    done = True
+                else:
+                    nodes = newnodes[:]
+                    names = newnames[:]
+                    pairings = tree.branchify(range(len(nodes)))
+            done = comm.bcast(done, root=0)
+
+        t2 = time()
+        self.time = t2 - t1
 
 class PairDistFn(object):
     """Creates all radial distributions from a set of binding sites to
@@ -484,14 +601,19 @@ def site_xyz(dic):
     f.close()
 
 def main_pharma():
+    t1 = time()
     _MOF_STRING = "./"
-    pharma = Pharmacophore()
+    #pharma = Pharmacophore()
+    pharma = MPIPharmacophore()
     pharma.radii = 4.5 
     directory = MOFDiscovery(_MOF_STRING)
     count = 0
     for mof, path in directory.dir_scan():
-        print mof
-        if count == 10:
+        try:
+            max_mofs = int(sys.argv[1])
+        except IndexError:
+            max_mofs = 1
+        if count == max_mofs:
             break
         faps_mof = Structure(name=mof)
         faps_mof.from_cif(os.path.join(path, mof+".cif"))
@@ -517,8 +639,15 @@ def main_pharma():
                     #    #site_xyz(site)
                     #    #active_site.debug("active_site")
         count+=1
-    #pharma.run_pharma()
+    t2 = time()
     pharma.run_pharma_tree()
+    t3 = time()
+    if rank == 0:
+        print "Finished. Scanned %i binding sites"%(pharma.site_count)
+        print "   time for initialization = %5.3f seconds"%(t2-t1)
+        print " time for pharma discovery = %5.3f seconds"%(pharma.time)
+        print "                Total time = %5.3f seconds"%(t3-t1)
+
 if __name__ == "__main__":
     main_pharma()
     #main()
