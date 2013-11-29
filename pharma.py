@@ -29,7 +29,7 @@ except ImportError:
     print "Warning! no module named mpi4py found, I hope you are not running this in parallel!"
     pass
 # set random seed to re-produce results
-random.seed(5)
+#random.seed(5)
 """
 Designed to compute RDFs.  Read in binding site xyz, and associated energy.  Compute distances to functional groups.
 Plot RDFs
