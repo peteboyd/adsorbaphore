@@ -9,6 +9,7 @@ import networkx as nx
 from time import time
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 from random import shuffle
 from scipy.spatial import distance
 from math import pi
@@ -24,11 +25,11 @@ try:
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
-
 except ImportError:
     print "Warning! no module named mpi4py found, I hope you are not running this in parallel!"
     pass
-
+# set random seed to re-produce results
+random.seed(5)
 """
 Designed to compute RDFs.  Read in binding site xyz, and associated energy.  Compute distances to functional groups.
 Plot RDFs
@@ -308,15 +309,15 @@ class Pharmacophore(object):
         newnodes, newnames, new_bads = [], [], []
         for (i, j) in pairings:
             # check if the pair has already been tried, and failed.
-            if (i is not None)and(j is not None)and(
-                    self.failed_pair(names[i], names[j])):
-                g1, g2 = nodes[i], nodes[j]
-                newnodes.append(g1)
-                newnodes.append(g2)
-                newnames.append(names[i])
-                newnames.append(names[j])
-                no_pairs += 1
-                continue
+            #if (i is not None)and(j is not None)and(
+            #        self.failed_pair(names[i], names[j])):
+            #    g1, g2 = nodes[i], nodes[j]
+            #    newnodes.append(g1)
+            #    newnodes.append(g2)
+            #    newnames.append(names[i])
+            #    newnames.append(names[j])
+            #    no_pairs += 1
+            #    continue
             # else: continue with the pharmacophore generation
             if i is not None and j is not None:
                 g1, g2 = nodes[i], nodes[j]
@@ -324,19 +325,19 @@ class Pharmacophore(object):
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
-                    (g1 % p).debug("Pharma")
+                    #(g1 % p).debug("Pharma")
                     newnodes.append( g1 % p )
                     newname = names[i] + names[j]
                     newnames.append(newname)
                 
                 # append to the bad_pair dictionary otherwise
                 else:
-                    new_bads += self.get_bad_pairs(names[i], names[j])
+                    #new_bads += self.get_bad_pairs(names[i], names[j])
                     newnodes.append(g1)
                     newnodes.append(g2)
                     newnames.append(names[i])
                     newnames.append(names[j])
-
+                    no_pairs += 1
             # in cases where the number of active sites is odd,
             # the itertools function will produce a pair that has
             # (int, None). This is to account for that.
@@ -354,6 +355,7 @@ class Pharmacophore(object):
                 newnames.append( names[i] )
                 no_pairs += 1
 
+        #print "rank %i"%rank, "pairings %i"%(len(pairings)), "no_pairs count %i"%no_pairs
         return newnodes, newnames, no_pairs, new_bads 
 
     def run_pharma_tree(self, tol=0.4):
@@ -384,7 +386,6 @@ class Pharmacophore(object):
             # pass count was hard-coded to 9 for some reason.. I don't even
             # think it needs to be this high.
             if len(newnodes) <= 1 or pass_count == self.max_pass_count:
-                #print [len(i) for i in names]
                 done = True
 
             else:
@@ -393,6 +394,7 @@ class Pharmacophore(object):
                 pairings = tree.branchify(range(len(nodes)))
         t2 = time()
         self.time = t2 - t1
+        return newnodes, newnames
 
 class MPIPharmacophore(Pharmacophore):
 
@@ -413,7 +415,7 @@ class MPIPharmacophore(Pharmacophore):
             for c, j in enumerate(val):
                 name = key + ".%i"%(c)
                 tree.add(name, j)
-        pairings = tree.branchify(tree.nodes) # initial pairing up of active sites
+        orig_pairings = tree.branchify(tree.nodes) # initial pairing up of active sites
         nodes = tree.nodes   # initial arrays of nodes
         names = [[i] for i in tree.names] # initial list of lists of names
 
@@ -425,10 +427,10 @@ class MPIPharmacophore(Pharmacophore):
             # Some MPI stuff
             if rank == 0:
                 chunks = []
-                sz = int(math.ceil(float(len(list(pairings)))/ float(size)))
+                sz = int(math.ceil(float(len(list(orig_pairings)))/ float(size)))
                 if sz == 0:
                     sz = 1
-                for i in self.chunks(pairings, sz):
+                for i in self.chunks(orig_pairings, sz):
                     chunks.append(i)
                 # shitty hack for making the last node do nothing
                 for i in range(size-len(chunks)):
@@ -437,8 +439,6 @@ class MPIPharmacophore(Pharmacophore):
             newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names, tol)
             # make sure each node has the same self.bad_pairings
             new_bad = [i for j in comm.allgather(new_bad) for i in j]
-            # this is a work-around for the mpi version, this was originally in the routine above
-            # but now this dictionary needs to be broadcast to all nodes.
             self.add_bad_pairs(new_bad)
             # collect the pairings.
             newnodes = comm.gather(newnodes, root=0)
@@ -448,23 +448,28 @@ class MPIPharmacophore(Pharmacophore):
                 no_pairs = sum(no_pairs)
                 newnodes = [j for i in newnodes for j in i]
                 newnames = [j for i in newnames for j in i]
-
-                if no_pairs == len(pairings):
+                # for some reason the number of no_pairs can get larger than
+                # the number of pairings broadcast to each node...?
+                if no_pairs >= len(orig_pairings):
                     pass_count += 1
 
                 # pass count was hard-coded to 9 for some reason.. I don't 
                 # think it needs to be this high.
                 if len(newnodes) <= 1 or pass_count == self.max_pass_count:
-                    #print [len(i) for i in names]
                     done = True
+
                 else:
                     nodes = newnodes[:]
                     names = newnames[:]
-                    pairings = tree.branchify(range(len(nodes)))
-            done = comm.bcast(done, root=0)
+                    orig_pairings = tree.branchify(range(len(nodes)))
 
+            # broadcast the complete list of nodes and names to the other nodes.
+            nodes = comm.bcast(newnodes, root=0)
+            names = comm.bcast(newnames, root=0)
+            done = comm.bcast(done, root=0)
         t2 = time()
         self.time = t2 - t1
+        return newnodes, newnames
 
 class PairDistFn(object):
     """Creates all radial distributions from a set of binding sites to
@@ -602,7 +607,7 @@ def site_xyz(dic):
 
 def main_pharma():
     t1 = time()
-    _MOF_STRING = "./"
+    _MOF_STRING = "/share/scratch/pboyd/binding_sites"
     #pharma = Pharmacophore()
     pharma = MPIPharmacophore()
     pharma.radii = 4.5 
@@ -640,13 +645,21 @@ def main_pharma():
                     #    #active_site.debug("active_site")
         count+=1
     t2 = time()
-    pharma.run_pharma_tree()
+    #if rank==0:
+    #    print "number of binding sites = %i"%(pharma.site_count)
+    #sys.exit()
+    final_nodes, final_names = pharma.run_pharma_tree()
+    #print final_names
+
     t3 = time()
     if rank == 0:
         print "Finished. Scanned %i binding sites"%(pharma.site_count)
-        print "   time for initialization = %5.3f seconds"%(t2-t1)
+        #print "   time for initialization = %5.3f seconds"%(t2-t1)
         print " time for pharma discovery = %5.3f seconds"%(pharma.time)
-        print "                Total time = %5.3f seconds"%(t3-t1)
+        #print "                Total time = %5.3f seconds"%(t3-t1)
+        #print "\nPrinting the names of the found active sites:"
+        #for id, name in enumerate(final_names):
+        #    print "%i)\t"%(id), " ".join(name)
 
 if __name__ == "__main__":
     main_pharma()
