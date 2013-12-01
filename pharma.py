@@ -4,6 +4,7 @@ import os
 import sys
 import pickle
 import math
+from optparse import OptionParser
 import itertools
 import networkx as nx
 from time import time
@@ -28,13 +29,67 @@ try:
 except ImportError:
     print "Warning! no module named mpi4py found, I hope you are not running this in parallel!"
     pass
-# set random seed to re-produce results
-#random.seed(5)
-"""
-Designed to compute RDFs.  Read in binding site xyz, and associated energy.  Compute distances to functional groups.
-Plot RDFs
-"""
 
+class CommandLine(object):
+    """Parse command line options and communicate directives to the program."""
+
+    def __init__(self):
+        self.commands = {}
+        self.command_options()
+
+    def command_options(self):
+        usage = "%prog [options]"
+        parser = OptionParser(usage=usage)
+        parser.add_option("-N", "--num_mofs", action="store",
+                          type="int",
+                          default=8,
+                          dest="nmofs",
+                          help="Set the number of MOFs to scan binding sites "+
+                          "for, this will be on a first-come first-serve basis. "+
+                          "Default is 8 MOFs.")
+        parser.add_option("--radii", action="store",
+                          type="float",
+                          default=4.5,
+                          dest="radii",
+                          help="Set the radius around each atom in the " +
+                          "binding site [CO2] in which to collect framework "+
+                          "atoms to be included in the 'active site'. "+
+                          "Default set to 4.5 Angstroms.")
+        parser.add_option("--min_atom_cutoff", action="store",
+                          type="int",
+                          default=9,
+                          dest="mac",
+                          help="Set the minimum number of atoms " +
+                          "allowed when finding a maximum clique between "+
+                          "two active sites. Default is 9 atoms.")
+        parser.add_option("--random_seed", action="store",
+                          type="int",
+                          default=None,
+                          dest="seed",
+                          help="request the random number generation "+
+                               "required to randomly pair active sites to be "+
+                               "seeded with an integer. Default will seed based "+
+                               "on the system time.")
+        parser.add_option("--num_pass", action="store",
+                          type="int",
+                          dest="num_pass",
+                          default=9,
+                          help="Termination criteria. The program will be considered "+
+                               "'done' when no new active sites are found from "+
+                               "this many consecutive sets of random pairings of active sites. "+
+                               "The default is 9 passes.")
+        parser.add_option("--tol", action="store",
+                          type="float",
+                          default=0.4,
+                          dest="tol",
+                          help="set tolerance in angstroms for the clique "+
+                               "finding algorithm. Default is 0.4 Angstroms.")
+        parser.add_option("--par", action="store_true",
+                          default=False,
+                          dest="MPI",
+                          help="Toggle the parallel version of the code. Defalut serial.")
+        (local_options, local_args) = parser.parse_args()
+        self.options = local_options
 
 class Plot(object):
     def __init__(self):
@@ -223,14 +278,25 @@ class NetLoader(dict):
 class Pharmacophore(object):
 
     """Grab atoms surrounding binding sites. compare with maximal clique detection."""
-    def __init__(self, radii=3.5):
+    def __init__(self, radii=4.5, min_atom_cutoff=9, max_pass_count=20, random_seed=None, tol=0.4):
         self.site_count = 0
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
         self._radii = radii # radii to scan for active site atoms
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
-        self.max_pass_count = 9
-        self.min_atom_cutoff = 9
+        self.max_pass_count = max_pass_count 
+        self.min_atom_cutoff = min_atom_cutoff
         self.time = 0.
+        self.tol = tol
+        # initialize a random seed (for testing purposes)
+        if random_seed is None:
+            # make the seed time-based, but still be able to recover what it
+            # is for tracking purposes
+            self.seed = random.randint(0, sys.maxint)
+        else:
+            random.seed(random_seed)
+            self.seed = random_seed
+        # set the random seed
+        random.seed(self.seed)
 
     @property
     def radii(self):
@@ -263,14 +329,14 @@ class Pharmacophore(object):
         self.site_count += 1
         self._active_sites.setdefault(name, []).append(activesite)
 
-    def get_clique(self, g1, g2, tol):
+    def get_clique(self, g1, g2):
         """Returns the atoms in g1 which constitute a maximal clique
         with respect to g2 and a given tolerance.
 
         """
         cg = CorrGraph(sub_graph=g1)
         cg.pair_graph = g2
-        cg.correspondence_api(tol=tol)
+        cg.correspondence_api(tol=self.tol)
         mc = cg.extract_clique()
         clique = mc.next()
         return clique
@@ -303,7 +369,7 @@ class Pharmacophore(object):
         """
         pass
 
-    def combine_pairs(self, pairings, nodes, names, tol):
+    def combine_pairs(self, pairings, nodes, names):
         """Combining pairs of active sites"""
         no_pairs = 0
         newnodes, newnames, new_bads = [], [], []
@@ -321,7 +387,7 @@ class Pharmacophore(object):
             # else: continue with the pharmacophore generation
             if i is not None and j is not None:
                 g1, g2 = nodes[i], nodes[j]
-                p = self.get_clique(g1, g2, tol)
+                p = self.get_clique(g1, g2)
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
@@ -358,7 +424,7 @@ class Pharmacophore(object):
         #print "rank %i"%rank, "pairings %i"%(len(pairings)), "no_pairs count %i"%no_pairs
         return newnodes, newnames, no_pairs, new_bads 
 
-    def run_pharma_tree(self, tol=0.4):
+    def run_pharma_tree(self):
         """Take all active sites and join them randomly. This is a breadth
         first reverse-tree algorithm."""
         done = False
@@ -366,7 +432,7 @@ class Pharmacophore(object):
         tree = Tree()
         # collect all the active sites in nodes.. this is depreciated.
         for key, val in self._active_sites.items():
-            for c, j in enumerate(val):
+            for c, j in enumerate(val): 
                 name = key + ".%i"%(c)
                 tree.add(name, j)
         pairings = tree.branchify(tree.nodes) # initial pairing up of active sites
@@ -375,7 +441,7 @@ class Pharmacophore(object):
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
         while not done:
             # loop over pairings, each successive pairing should narrow down the active sites
-            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names, tol)
+            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names)
             # this is a work-around for the mpi version, this was originally in the routine above
             # but now this dictionary needs to be broadcast to all nodes.
             self.add_bad_pairs(new_bad)
@@ -383,8 +449,14 @@ class Pharmacophore(object):
             # all the entries being in the _bad_pair dictionary
             if no_pairs == len(pairings):
                 pass_count += 1
-            # pass count was hard-coded to 9 for some reason.. I don't even
-            # think it needs to be this high.
+
+            # TESTME(pboyd): This may really slow down the routine.
+            else:
+                # re-set if some good sites were found
+                pass_count = 0
+            # TESTME(pboyd)
+
+
             if len(newnodes) <= 1 or pass_count == self.max_pass_count:
                 done = True
 
@@ -396,6 +468,21 @@ class Pharmacophore(object):
         self.time = t2 - t1
         return newnodes, newnames
 
+    def write_final_files(self, names, pharma_graphs): 
+        pickle_dic = {}
+        filebasename='%s_N.%i_r.%3.2f_ac.%i_ma.%i_rs.%i_t.%3.2f'%("pharma",
+                                                 self.site_count,
+                                                 self.radii,
+                                                 self.min_atom_cutoff,
+                                                 self.max_pass_count,
+                                                 self.seed,
+                                                 self.tol)
+        for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
+            pickle_dic[tuple(name)] = pharma
+        f = open(filebasename+".pkl", 'wb')
+        pickle.dump(pickle_dic, f)
+        f.close()
+
 class MPIPharmacophore(Pharmacophore):
 
     def chunks(self, l, n):
@@ -403,10 +490,9 @@ class MPIPharmacophore(Pharmacophore):
         for i in xrange(0, len(l), n):
             yield l[i:i+n]
 
-    def run_pharma_tree(self, tol=0.4):
+    def run_pharma_tree(self):
         """Take all active sites and join them randomly. This is a breadth
         first reverse-tree algorithm."""
-        
         t1 = time()
         done = False
         tree = Tree()
@@ -436,7 +522,7 @@ class MPIPharmacophore(Pharmacophore):
                 for i in range(size-len(chunks)):
                     chunks.append([(None,None)])
             pairings = comm.scatter(chunks, root=0)
-            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names, tol)
+            newnodes, newnames, no_pairs, new_bad = self.combine_pairs(pairings, nodes, names)
             # make sure each node has the same self.bad_pairings
             new_bad = [i for j in comm.allgather(new_bad) for i in j]
             self.add_bad_pairs(new_bad)
@@ -452,6 +538,10 @@ class MPIPharmacophore(Pharmacophore):
                 # the number of pairings broadcast to each node...?
                 if no_pairs >= len(orig_pairings):
                     pass_count += 1
+                # TESTME(pboyd): This may really slow down the routine.
+                else:
+                # re-set if some good sites were found
+                    pass_count = 0
 
                 # pass count was hard-coded to 9 for some reason.. I don't 
                 # think it needs to be this high.
@@ -605,61 +695,71 @@ def site_xyz(dic):
         f.writelines("%s %9.4f %9.4f %9.4f\n"%(key[:1], val[0], val[1], val[2]))
     f.close()
 
+def add_to_pharmacophore(mof, pharma, path):
+    faps_graph = pharma.get_main_graph(mof)
+    binding_sites = BindingSiteDiscovery(path)
+    if binding_sites.absl_calc_exists():
+        binding_sites.co2_xyz_parser()
+        binding_sites.energy_parser()
+        for site in binding_sites.sites:
+            el = site.pop('electrostatic')
+            vdw = site.pop('vanderwaals')
+            if el + vdw < -30.:
+                coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
+                active_site = pharma.get_active_site(coords, faps_graph)
+                # set all elements to C so that the graph matching is non-discriminatory
+                #active_site.set_elem_to_C()
+                pharma.store_active_site(active_site, name=mof.name)
+                #if count == 2:
+                #    shift = site['C']
+                #    site['C'] = site['C'] - shift
+                #    site['O1'] = site['O1'] - shift
+                #    site['O2'] = site['O2'] - shift
+                #    #site_xyz(site)
+                #    #active_site.debug("active_site")
+
+
 def main_pharma():
+    options = CommandLine().options
     t1 = time()
+
     _MOF_STRING = "/share/scratch/pboyd/binding_sites"
-    #pharma = Pharmacophore()
-    pharma = MPIPharmacophore()
-    pharma.radii = 4.5 
+    if options.MPI:
+        pharma = MPIPharmacophore(
+                           radii=options.radii,
+                           min_atom_cutoff=options.mac,
+                           max_pass_count=options.num_pass,
+                           random_seed=options.seed,
+                           tol=options.tol)
+    else:
+        pharma = Pharmacophore(
+                           radii=options.radii,
+                           min_atom_cutoff=options.mac,
+                           max_pass_count=options.num_pass,
+                           random_seed=options.seed,
+                           tol=options.tol)
     directory = MOFDiscovery(_MOF_STRING)
     count = 0
     for mof, path in directory.dir_scan():
-        try:
-            max_mofs = int(sys.argv[1])
-        except IndexError:
-            max_mofs = 1
-        if count == max_mofs:
+        if count == options.nmofs:
             break
         faps_mof = Structure(name=mof)
         faps_mof.from_cif(os.path.join(path, mof+".cif"))
-        faps_graph = pharma.get_main_graph(faps_mof)
-        binding_sites = BindingSiteDiscovery(path)
-        if binding_sites.absl_calc_exists():
-            binding_sites.co2_xyz_parser()
-            binding_sites.energy_parser()
-            for site in binding_sites.sites:
-                el = site.pop('electrostatic')
-                vdw = site.pop('vanderwaals')
-                if el + vdw < -30.:
-                    coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
-                    active_site = pharma.get_active_site(coords, faps_graph)
-                    # set all elements to C so that the graph matching is non-discriminatory
-                    #active_site.set_elem_to_C()
-                    pharma.store_active_site(active_site, name=mof)
-                    #if count == 2:
-                    #    shift = site['C']
-                    #    site['C'] = site['C'] - shift
-                    #    site['O1'] = site['O1'] - shift
-                    #    site['O2'] = site['O2'] - shift
-                    #    #site_xyz(site)
-                    #    #active_site.debug("active_site")
+        add_to_pharmacophore(faps_mof, pharma, path)
         count+=1
     t2 = time()
     #if rank==0:
     #    print "number of binding sites = %i"%(pharma.site_count)
     #sys.exit()
     final_nodes, final_names = pharma.run_pharma_tree()
-    #print final_names
-
     t3 = time()
     if rank == 0:
+        # write the pickle stuff
+        pharma.write_final_files(final_names, final_nodes)
         print "Finished. Scanned %i binding sites"%(pharma.site_count)
         #print "   time for initialization = %5.3f seconds"%(t2-t1)
-        print " time for pharma discovery = %5.3f seconds"%(pharma.time)
+        print "time for pharma discovery = %5.3f seconds"%(pharma.time)
         #print "                Total time = %5.3f seconds"%(t3-t1)
-        #print "\nPrinting the names of the found active sites:"
-        #for id, name in enumerate(final_names):
-        #    print "%i)\t"%(id), " ".join(name)
 
 if __name__ == "__main__":
     main_pharma()
