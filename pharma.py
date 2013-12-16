@@ -16,7 +16,10 @@ from scipy.spatial import distance
 from math import pi
 from nets import Net
 from sub_graphs import SubGraph
-from correspondence_graphs import CorrGraph
+#from correspondence_graphs import CorrGraph
+sys.path.append("/home/pboyd/codes_in_development/mcqd_api/build/lib.linux-x86_64-2.7")
+import _mcqd as mcqd
+
 from faps import Structure
 global rank, size, comm
 rank, size, comm = 0, 0, None
@@ -301,7 +304,8 @@ class Pharmacophore(object):
     """Grab atoms surrounding binding sites. compare with maximal clique detection."""
     def __init__(self, radii=4.5, min_atom_cutoff=9, max_pass_count=20, random_seed=None, tol=0.4):
         self.site_count = 0
-        self.energy = {}
+        self.el_energy = {}
+        self.vdw_energy = {}
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
         self._radii = radii # radii to scan for active site atoms
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
@@ -347,9 +351,10 @@ class Pharmacophore(object):
         site.shift_by_vector(binding_site[0])
         return site 
 
-    def store_active_site(self, activesite, name='Default', energy=0.):
+    def store_active_site(self, activesite, name='Default', el_energy=0., vdw_energy=0.):
         self.site_count += 1
-        self.energy[name] = energy
+        self.el_energy[name] = el_energy
+        self.vdw_energy[name] = vdw_energy
         self._active_sites[name] = activesite
 
     def get_clique(self, g1, g2):
@@ -357,12 +362,25 @@ class Pharmacophore(object):
         with respect to g2 and a given tolerance.
 
         """
-        cg = CorrGraph(sub_graph=g1)
-        cg.pair_graph = g2
-        cg.correspondence_api(tol=self.tol)
-        mc = cg.extract_clique()
-        clique = mc.next()
-        return clique
+        nodes = mcqd.correspondence(g1.elements, g2.elements)
+        if not nodes:
+            return []
+        adj_matrix = mcqd.correspondence_edges(nodes,
+                                               g1.distances,
+                                               g2.distances,
+                                               self.tol)
+        size = len(nodes)
+        clique = mcqd.maxclique(adj_matrix, size)
+        #cg.correspondence_api(tol=self.tol)
+        #cg.correspondence(tol=self.tol)
+        #mc = cg.extract_clique()
+        #clique = mc.next()
+        #g = min(g1, g2, key=len)
+        #clique = range(len(g))
+        if not clique:
+            return []
+        else:
+            return [nodes[i][0] for i in clique]
 
     def failed_pair(self, nameset1, nameset2):
         for i,j in itertools.product(nameset1, nameset2):
@@ -392,9 +410,9 @@ class Pharmacophore(object):
                     #(g1 % p).debug("Pharma")
                     newnode = ( g1 % p )
                     newname = self.create_name_from_pair(i, j)
-                    self._active_sites.pop(i)
-                    self._active_sites.pop(j)
                     self._active_sites.update({newname:newnode})
+                    del self._active_sites[i]
+                    del self._active_sites[j]
                 # append to the bad_pair dictionary otherwise
                 else:
                     no_pairs += 1
@@ -428,11 +446,20 @@ class Pharmacophore(object):
         for i, j in pairings:
             pairing_count += 1
             if i is not None and j is not None:
-                pairing_names.append((node_list[i], node_list[j]))
+                try:
+                    pairing_names.append((node_list[i], node_list[j]))
+                except IndexError:
+                    pass
             elif i is None and j is not None:
-                pairing_names.append((None, node_list[j]))
+                try:
+                    pairing_names.append((None, node_list[j]))
+                except IndexError:
+                    pass
             elif j is None and i is not None:
-                pairing_names.append((node_list[i], None))
+                try:
+                    pairing_names.append((node_list[i], None))
+                except IndexError:
+                    pass
             else:
                 pairing_names.append((None, None))
         return pairing_names, pairing_count
@@ -451,6 +478,7 @@ class Pharmacophore(object):
             # loop over pairings, each successive pairing should narrow down the active sites
             no_pairs = self.combine_pairs(pairing_names)
             # count the number of times no pairings were made
+            pairings = tree.branchify(node_list)
             if no_pairs == pairing_count:
                 pass_count += 1
             # TESTME(pboyd): This may really slow down the routine.
@@ -458,11 +486,11 @@ class Pharmacophore(object):
                 # re-set if some good sites were found
                 pass_count = 0
             # TESTME(pboyd)
-            if pass_count == self.max_pass_count:
+            if pass_count == self.max_pass_count or pairings is None:
                 done = True
             else:
                 node_list = self._active_sites.keys()
-                pairings = tree.branchify(node_list)
+                
                 pairing_names, pairing_count = self.gen_pairing_names(pairings, 
                                                                       node_list)
 
@@ -479,11 +507,40 @@ class Pharmacophore(object):
                                                  self.max_pass_count,
                                                  self.seed,
                                                  self.tol)
+        f = open(filebasename+".csv", 'w')
+        f.writelines("site_number,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
         for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
             pickle_dic[name] = pharma
+            el, vdw, tot = [], [], []
+            if isinstance(name, tuple):
+                [el.append(self.el_energy[i]) for i in name]
+                [vdw.append(self.vdw_energy[i]) for i in name]
+                [tot.append(self.vdw_energy[i]+self.el_energy[i]) for i in name]
+
+                elavg = numpy.mean(el)
+                elstd = numpy.stdev(el)
+                vdwavg = numpy.mean(vdw)
+                vdwstd = numpy.stdev(vdw)
+                totavg = numpy.mean(tot)
+                totstd = numpy.stdev(tot)
+            else:
+                elavg = self.el_energy[name] 
+                elstd = 0. 
+                vdwavg = self.vdw_energy[name]
+                vdwstd = 0. 
+                totavg = self.vdw_energy[name] + self.el_energy[name]
+                totstd = 0.
+
+            f.writelines("%i,%f,%f,%f,%f,%f,%f,%s\n"%(id,elavg,elstd,vdwavg,
+                                                      vdwstd,totavg,totstd,name))
+
+        f.close()
         f = open(filebasename+".pkl", 'wb')
         pickle.dump(pickle_dic, f)
         f.close()
+
+        # write an energy distribution file
+
 
 class MPIPharmacophore(Pharmacophore, MPITools):
     """Each rank has it's own set of active sites, these need to be tracked for 
@@ -634,8 +691,8 @@ class MPIPharmacophore(Pharmacophore, MPITools):
                     #(g1 % p).debug("Pharma")
                     newnode = ( g1 % p )
                     newname = self.create_name_from_pair(i[0], j[0])
-                    self._active_sites.pop(j[0])
-                    self._active_sites.pop(i[0])
+                    del self._active_sites[j[0]]
+                    del self._active_sites[i[0]]
                     self._active_sites.update({newname:newnode})
                 else:
                     no_pairs += 1
