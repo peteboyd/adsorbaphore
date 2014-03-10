@@ -18,6 +18,8 @@ from nets import Net
 from sub_graphs import SubGraph
 #from correspondence_graphs import CorrGraph
 sys.path.append("/home/pboyd/codes_in_development/mcqd_api/build/lib.linux-x86_64-2.7")
+sys.path.append("/home/pboyd/codes_in_development/topcryst")
+from LinAlg import rotation_from_vectors
 import _mcqd as mcqd
 
 from faps import Structure
@@ -146,28 +148,28 @@ class MOFDiscovery(object):
         """
         return dir.startswith(self.mof_def) and not dir.endswith("_absl")
 
-class MPIMOFDiscovery(MOFDiscovery, MPITools):
-    
-    def dir_scan(self, max_mofs=None):
-        chunks, ranks = None, None
-        if rank == 0:
-            f = open("MOFs_used.csv", "w")
-            count = 0 
-            for root, directories, filenames in os.walk(self.directory):
-                mofdir = os.path.basename(root)
-                if self._valid_mofdir(mofdir):
-                    f.writelines("%s\n"%mofdir)
-                    self.mof_dirs.append((mofdir,root))
-                    count += 1
-                if (max_mofs is not None) and (count == max_mofs):
-                    break
-            f.close()
-            sz = int(math.ceil(float(len(self.mof_dirs)) / float(size)))
-            ranks, chunks = [], []
-            for rr, ch in enumerate(self.chunks(self.mof_dirs, sz)):
-                ranks += [rr for i in range(len(ch))]
-                chunks.append(ch)
-        self.mof_dirs = comm.scatter(chunks, root=0)
+#class MPIMOFDiscovery(MOFDiscovery, MPITools):
+#    
+#    def dir_scan(self, max_mofs=None):
+#        chunks, ranks = None, None
+#        if rank == 0:
+#            f = open("MOFs_used.csv", "w")
+#            count = 0 
+#            for root, directories, filenames in os.walk(self.directory):
+#                mofdir = os.path.basename(root)
+#                if self._valid_mofdir(mofdir):
+#                    f.writelines("%s\n"%mofdir)
+#                    self.mof_dirs.append((mofdir,root))
+#                    count += 1
+#                if (max_mofs is not None) and (count == max_mofs):
+#                    break
+#            f.close()
+#            sz = int(math.ceil(float(len(self.mof_dirs)) / float(size)))
+#            ranks, chunks = [], []
+#            for rr, ch in enumerate(self.chunks(self.mof_dirs, sz)):
+#                ranks += [rr for i in range(len(ch))]
+#                chunks.append(ch)
+#        self.mof_dirs = comm.scatter(chunks, root=0)
 
 class Tree(object):
     """Tree creates a pairwise iteration technique for pairing and narrowing
@@ -307,12 +309,14 @@ class Pharmacophore(object):
         self.el_energy = {}
         self.vdw_energy = {}
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
+        self._co2_sites = {}
         self._radii = radii # radii to scan for active site atoms
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
         self.max_pass_count = max_pass_count 
         self.min_atom_cutoff = min_atom_cutoff
         self.time = 0.
         self.tol = tol
+        self.grid = (10, 10, 10)
         # initialize a random seed (for testing purposes)
         if random_seed is None:
             # make the seed time-based, but still be able to recover what it
@@ -357,6 +361,9 @@ class Pharmacophore(object):
         self.vdw_energy[name] = vdw_energy
         self._active_sites[name] = activesite
 
+    def store_co2_pos(self, pos, name='Default'):
+        self._co2_sites[name] = pos
+
     def get_clique(self, g1, g2):
         """Returns the atoms in g1 which constitute a maximal clique
         with respect to g2 and a given tolerance.
@@ -378,9 +385,9 @@ class Pharmacophore(object):
         #g = min(g1, g2, key=len)
         #clique = range(len(g))
         if not clique:
-            return []
+            return [],[]
         else:
-            return [nodes[i][0] for i in clique]
+            return [nodes[i][0] for i in clique], [nodes[i][1] for i in clique]
 
     def failed_pair(self, nameset1, nameset2):
         for i,j in itertools.product(nameset1, nameset2):
@@ -397,22 +404,36 @@ class Pharmacophore(object):
         """
         pass
 
-    def combine_pairs(self, pairings):
+    def get_rep_site_name(self, n):
+        if isinstance(n, tuple):
+            return n[0]
+        elif isinstance(n, str):
+            return n
+
+    def get_rep_nodes(self, name, sites):
+        return [i if isinstance(i, int) else i[0] for i in sites[name]]
+
+    def combine_pairs(self, pairings, sites):
         """Combining pairs of active sites"""
         no_pairs = 0
         for (i, j) in pairings:
             if i is not None and j is not None:
-                g1, g2 = self._active_sites[i], self._active_sites[j] 
-                p = self.get_clique(g1, g2)
+                # get the representative names, representative atoms
+                namei, namej = self.get_rep_site_name(i), self.get_rep_site_name(j)
+                asi, asj = self._active_sites[namei], self._active_sites[namej]
+                nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
+                g1, g2 = (asi % nodesi), (asj % nodesj)
+                p,q = self.get_clique(g1, g2)
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
                     #(g1 % p).debug("Pharma")
-                    newnode = ( g1 % p )
+                    newnode = self.create_node_from_pair([sites[i][xx] for xx in p], 
+                                                         [sites[j][yy] for yy in q])
                     newname = self.create_name_from_pair(i, j)
-                    self._active_sites.update({newname:newnode})
-                    del self._active_sites[i]
-                    del self._active_sites[j]
+                    sites.update({newname:newnode})
+                    del sites[i]
+                    del sites[j]
                 # append to the bad_pair dictionary otherwise
                 else:
                     no_pairs += 1
@@ -429,7 +450,24 @@ class Pharmacophore(object):
             elif j is None:
                 no_pairs += 1
         return no_pairs
-    
+
+    def create_node_from_pair(self, arg1, arg2):
+        sum = []
+        for ii, jj in zip(arg1, arg2):
+            instsum = []
+            if isinstance(ii, tuple):
+                for i in ii:
+                    instsum.append(i)
+            elif isinstance(ii, int):
+                instsum.append(ii)
+            if isinstance(jj, tuple):
+                for j in jj:
+                    instsum.append(j)
+            elif isinstance(jj, int):
+                instsum.append(jj)
+            sum.append(tuple(instsum))
+        return tuple(sum)
+
     def create_name_from_pair(self, arg1, arg2):
         sum = []
         for arg in (arg1, arg2):
@@ -474,9 +512,10 @@ class Pharmacophore(object):
         pairings = tree.branchify(node_list) # initial pairing up of active sites
         pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
+        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
         while not done:
             # loop over pairings, each successive pairing should narrow down the active sites
-            no_pairs = self.combine_pairs(pairing_names)
+            no_pairs = self.combine_pairs(pairing_names, pharma_sites)
             # count the number of times no pairings were made
             pairings = tree.branchify(node_list)
             if no_pairs == pairing_count:
@@ -489,17 +528,59 @@ class Pharmacophore(object):
             if pass_count == self.max_pass_count or pairings is None:
                 done = True
             else:
-                node_list = self._active_sites.keys()
+                node_list = pharma_sites.keys()
                 
                 pairing_names, pairing_count = self.gen_pairing_names(pairings, 
                                                                       node_list)
 
         t2 = time()
         self.time = t2 - t1
-        return self._active_sites.values(), self._active_sites.keys() 
+        return pharma_sites.values(), pharma_sites.keys()
+        #return self._active_sites.values(), self._active_sites.keys() 
+
+    def obtain_pharma_error(self, name, sites):
+        if not isinstance(name, tuple):
+            return 0.
+        base = self._active_sites[name[0]] % [j[0] for j in sites]
+        base.shift_by_centre_of_atoms()
+        mean_errors = []
+        for ii in range(1, len(name)):
+            atms = [q[ii] for q in sites]
+            match = self._active_sites[name[ii]] % atms
+            match.shift_by_centre_of_atoms()
+            R = rotation_from_vectors(match._coordinates[:], 
+                                      base._coordinates[:])
+            match.rotate(R)
+            mean_errors.append(np.mean(base._coordinates - match._coordinates))
+        return np.mean(mean_errors)
+
+    def obtain_co2_distribution(self, name, sites):
+
+        grid = np.zeros((10, 10, 10))
+        if not isinstance(name, tuple):
+            return grid
+        base = self._active_sites[name[0]] % [j[0] for j in sites]
+        base.shift_by_centre_of_atoms()
+        mean_errors = []
+        for ii in range(1, len(name)):
+            atms = [q[ii] for q in sites]
+            match = self._active_sites[name[ii]] % atms
+            match.shift_by_centre_of_atoms()
+            T = match.centre_of_atoms
+            R = rotation_from_vectors(match._coordinates[:], 
+                                      base._coordinates[:])
+            match.rotate(R)
+            co2 = self._co2_sites[name[ii]]
+            co2 -= T
+            co2 = np.dot(R[:3,:3], co2.T).T
+            # bin the x, y, and z
+            print co2
+        
+        return grid 
 
     def write_final_files(self, names, pharma_graphs, site_count): 
         pickle_dic = {}
+        co2_dist_dic = {}
         filebasename='%s_N.%i_r.%3.2f_ac.%i_ma.%i_rs.%i_t.%3.2f'%("pharma",
                                                  site_count,
                                                  self.radii,
@@ -508,21 +589,26 @@ class Pharmacophore(object):
                                                  self.seed,
                                                  self.tol)
         f = open(filebasename+".csv", 'w')
-        f.writelines("site_number,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
+        f.writelines("length,pharma_std,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
         for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
-            pickle_dic[name] = pharma
+            nn = name[0] if isinstance(name, tuple) else name
+            jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
+            
+            site = self._active_sites[nn] % jj
+            site.shift_by_centre_of_atoms()
+            pickle_dic[name] = site 
             el, vdw, tot = [], [], []
             if isinstance(name, tuple):
                 [el.append(self.el_energy[i]) for i in name]
                 [vdw.append(self.vdw_energy[i]) for i in name]
                 [tot.append(self.vdw_energy[i]+self.el_energy[i]) for i in name]
 
-                elavg = numpy.mean(el)
-                elstd = numpy.stdev(el)
-                vdwavg = numpy.mean(vdw)
-                vdwstd = numpy.stdev(vdw)
-                totavg = numpy.mean(tot)
-                totstd = numpy.stdev(tot)
+                elavg = np.mean(el)
+                elstd = np.std(el)
+                vdwavg = np.mean(vdw)
+                vdwstd = np.std(vdw)
+                totavg = np.mean(tot)
+                totstd = np.std(tot)
             else:
                 elavg = self.el_energy[name] 
                 elstd = 0. 
@@ -530,181 +616,185 @@ class Pharmacophore(object):
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-
-            f.writelines("%i,%f,%f,%f,%f,%f,%f,%s\n"%(id,elavg,elstd,vdwavg,
-                                                      vdwstd,totavg,totstd,name))
+            error = self.obtain_pharma_error(name, pharma)
+            co2_dist = self.obtain_co2_distribution(name, pharma)
+            co2_dist_dic[name] = co2_dist
+            f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
+                                                         vdwstd,totavg,totstd,name))
 
         f.close()
         f = open(filebasename+".pkl", 'wb')
         pickle.dump(pickle_dic, f)
         f.close()
-
+        f = open(filebasename+"_co2dist.pkl", 'wb')
+        pickle.dump(co2_dist_dic, f)
+        f.close()
         # write an energy distribution file
 
 
-class MPIPharmacophore(Pharmacophore, MPITools):
-    """Each rank has it's own set of active sites, these need to be tracked for 
-    pairings across nodes, which will either happen at each new pairing iteration,
-    or once the set of all binding sites on a node have been reduced fully."""
-
-    def generate_node_list(self):
-        return_list = []
-        for name in self._active_sites.keys():
-            return_list.append((name, rank))
-        return return_list
-
-    def data_distribution(self, pairing_names):
-        """Organize the data distribution for this loop"""
-        chunks = []
-        # format (from_node, active_site_name, to_node)
-        node_transmissions = [] 
-        sz = int(math.ceil(float(len(list(pairing_names)))/ float(size)))
-        if sz == 0:
-            sz = 1
-        # optimize where to send each chunks.?
-        for nt, i in enumerate(self.chunks(pairing_names, sz)):
-            chunks.append(i)
-            for n1, n2 in i:
-                try:
-                    name, nf = n1
-                    if nf == nt:
-                        pass
-                    else:
-                        node_transmissions.append((nf, name, nt))
-
-                except TypeError:
-                    pass
-                try:
-                    name, nf = n2
-                    if nf == nt:
-                        pass
-                    else:
-                        node_transmissions.append((nf, name, nt))
-                except TypeError:
-                    pass
-        # shitty hack for making the last node do nothing
-        for i in range(size-len(chunks)):
-            chunks.append([(None,None)])
-
-        return chunks, node_transmissions 
-        # need to tell the nodes where to send and recieve their
-        # active sites.
-
-    def assign_unique_ids(self, node_list):
-        return {name:id for id, (name, p) in enumerate(node_list)} 
-
-    def rank_zero_stuff(self, node_list):
-        tree = Tree()
-        node_list = [j for i in node_list for j in i]
-        uuids = self.assign_unique_ids(node_list)
-        pairings = tree.branchify(node_list) # initial pairing up of active sites
-        pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
-        return pairing_names, pairing_count, uuids
-
-    def run_pharma_tree(self):
-        """Take all active sites and join them randomly. This is a breadth
-        first reverse-tree algorithm."""
-        # rank 0 will keep a list of all the current active sites available, partition them, 
-        # and direct which nodes to pair what active sites. The other nodes will then 
-        # swap active sites, and pair. The resulting list of pairs will be sent back to
-        # rank 0 for future pairings.
-        t1 = time()
-        done = False
-        to_root = self.generate_node_list()
-        # collect list of nodes and all energies to the mother node. 
-        node_list = comm.gather(to_root, root=0)
-        energies = comm.gather(self.energy, root=0)
-        # perform the pairing centrally, then centrally assign pairings to different nodes
-        # maybe a smart way is to minimize the number of mpi send/recv calls by sending
-        # pairs off to nodes which possess one or more of the sites already.
-        if rank == 0:
-            [self.energy.update(i) for i in energies]
-            pairing_names, pairing_count, uuids = self.rank_zero_stuff(node_list)
-            chunks, node_transmissions = self.data_distribution(pairing_names)
-
-        while not done:
-            # loop over pairings, each successive pairing should narrow down the active sites
-            # broadcast the pairing to the nodes.
-            if rank != 0:
-                uuids, chunks, node_transmissions = None, None, None
-            # broadcast the uuids
-            uuids = comm.bcast(uuids, root=0)
-            # Some MPI stuff
-            pairings = comm.scatter(chunks, root=0)
-            node_transmissions = comm.bcast(node_transmissions, root=0)
-            self.collect_recieve(node_transmissions, uuids)
-            no_pairs = self.combine_pairs(pairings)
-           
-            no_pairs = comm.gather(no_pairs, root=0)
-            to_root = self.generate_node_list()
-            node_list = comm.gather(to_root, root=0)
-            if rank == 0:
-                no_pairs = sum(no_pairs)
-                # for some reason the number of no_pairs can get larger than
-                # the number of pairings broadcast to each node...?
-                if no_pairs >= pairing_count:
-                    pass_count += 1
-                # TESTME(pboyd): This may really slow down the routine.
-                else:
-                # re-set if some good sites were found
-                    pass_count = 0
-                if pass_count == self.max_pass_count:
-                    done = True
-                else:
-                    pairing_names, pairing_count, uuids = self.rank_zero_stuff(node_list)
-                    chunks, node_transmissions = self.data_distribution(pairing_names)
-            # broadcast the complete list of nodes and names to the other nodes.
-            done = comm.bcast(done, root=0)
-        t2 = time()
-        self.time = t2 - t1
-        # collect all the nodes and write some fancy stuff.
-        sites = comm.gather(self._active_sites, root=0)
-        if rank == 0:
-            for i in sites:
-                self._active_sites.update(i)
-            return self._active_sites.values(), self._active_sites.keys() 
-        return None, None
-        
-    def collect_recieve(self, node_transmissions, uuids):
-        """Send active sites on this node that are not in pairings, collect
-        active sites which are in pairings but not on this node."""
-        for n_from, name, n_to in node_transmissions:
-            tag_id = uuids[name]
-            if rank == n_from:
-                sending = self._active_sites.pop(name)
-                comm.send({name:sending}, dest=n_to, tag=tag_id)
-            elif rank == n_to:
-                site = comm.recv(source=n_from, tag=tag_id)
-                self._active_sites.update(site)
-
-
-    def combine_pairs(self, pairings):
-        """Combining pairs of active sites"""
-        no_pairs = 0
-        for (i, j) in pairings:
-            if i is not None and j is not None:
-                g1, g2 = self._active_sites[i[0]], self._active_sites[j[0]]
-                p = self.get_clique(g1, g2)
-                # check if the clique is greater than the number of
-                # atoms according to min_cutoff
-                if len(p) >= self.min_atom_cutoff:
-                    #(g1 % p).debug("Pharma")
-                    newnode = ( g1 % p )
-                    newname = self.create_name_from_pair(i[0], j[0])
-                    del self._active_sites[j[0]]
-                    del self._active_sites[i[0]]
-                    self._active_sites.update({newname:newnode})
-                else:
-                    no_pairs += 1
-            elif i is None and j is None:
-                continue
-            elif i is None:
-                no_pairs += 1
-            elif j is None:
-                no_pairs += 1
-
-        #print "rank %i"%rank, "pairings %i"%(len(pairings)), "no_pairs count %i"%no_pairs
-        return no_pairs
+#class MPIPharmacophore(Pharmacophore, MPITools):
+#    """Each rank has it's own set of active sites, these need to be tracked for 
+#    pairings across nodes, which will either happen at each new pairing iteration,
+#    or once the set of all binding sites on a node have been reduced fully."""
+#
+#    def generate_node_list(self):
+#        return_list = []
+#        for name in self._active_sites.keys():
+#            return_list.append((name, rank))
+#        return return_list
+#
+#    def data_distribution(self, pairing_names):
+#        """Organize the data distribution for this loop"""
+#        chunks = []
+#        # format (from_node, active_site_name, to_node)
+#        node_transmissions = [] 
+#        sz = int(math.ceil(float(len(list(pairing_names)))/ float(size)))
+#        if sz == 0:
+#            sz = 1
+#        # optimize where to send each chunks.?
+#        for nt, i in enumerate(self.chunks(pairing_names, sz)):
+#            chunks.append(i)
+#            for n1, n2 in i:
+#                try:
+#                    name, nf = n1
+#                    if nf == nt:
+#                        pass
+#                    else:
+#                        node_transmissions.append((nf, name, nt))
+#
+#                except TypeError:
+#                    pass
+#                try:
+#                    name, nf = n2
+#                    if nf == nt:
+#                        pass
+#                    else:
+#                        node_transmissions.append((nf, name, nt))
+#                except TypeError:
+#                    pass
+#        # shitty hack for making the last node do nothing
+#        for i in range(size-len(chunks)):
+#            chunks.append([(None,None)])
+#
+#        return chunks, node_transmissions 
+#        # need to tell the nodes where to send and recieve their
+#        # active sites.
+#
+#    def assign_unique_ids(self, node_list):
+#        return {name:id for id, (name, p) in enumerate(node_list)} 
+#
+#    def rank_zero_stuff(self, node_list):
+#        tree = Tree()
+#        node_list = [j for i in node_list for j in i]
+#        uuids = self.assign_unique_ids(node_list)
+#        pairings = tree.branchify(node_list) # initial pairing up of active sites
+#        pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
+#        return pairing_names, pairing_count, uuids
+#
+#    def run_pharma_tree(self):
+#        """Take all active sites and join them randomly. This is a breadth
+#        first reverse-tree algorithm."""
+#        # rank 0 will keep a list of all the current active sites available, partition them, 
+#        # and direct which nodes to pair what active sites. The other nodes will then 
+#        # swap active sites, and pair. The resulting list of pairs will be sent back to
+#        # rank 0 for future pairings.
+#        t1 = time()
+#        done = False
+#        to_root = self.generate_node_list()
+#        # collect list of nodes and all energies to the mother node. 
+#        node_list = comm.gather(to_root, root=0)
+#        energies = comm.gather(self.energy, root=0)
+#        # perform the pairing centrally, then centrally assign pairings to different nodes
+#        # maybe a smart way is to minimize the number of mpi send/recv calls by sending
+#        # pairs off to nodes which possess one or more of the sites already.
+#        if rank == 0:
+#            [self.energy.update(i) for i in energies]
+#            pairing_names, pairing_count, uuids = self.rank_zero_stuff(node_list)
+#            chunks, node_transmissions = self.data_distribution(pairing_names)
+#
+#        while not done:
+#            # loop over pairings, each successive pairing should narrow down the active sites
+#            # broadcast the pairing to the nodes.
+#            if rank != 0:
+#                uuids, chunks, node_transmissions = None, None, None
+#            # broadcast the uuids
+#            uuids = comm.bcast(uuids, root=0)
+#            # Some MPI stuff
+#            pairings = comm.scatter(chunks, root=0)
+#            node_transmissions = comm.bcast(node_transmissions, root=0)
+#            self.collect_recieve(node_transmissions, uuids)
+#            no_pairs = self.combine_pairs(pairings)
+#           
+#            no_pairs = comm.gather(no_pairs, root=0)
+#            to_root = self.generate_node_list()
+#            node_list = comm.gather(to_root, root=0)
+#            if rank == 0:
+#                no_pairs = sum(no_pairs)
+#                # for some reason the number of no_pairs can get larger than
+#                # the number of pairings broadcast to each node...?
+#                if no_pairs >= pairing_count:
+#                    pass_count += 1
+#                # TESTME(pboyd): This may really slow down the routine.
+#                else:
+#                # re-set if some good sites were found
+#                    pass_count = 0
+#                if pass_count == self.max_pass_count:
+#                    done = True
+#                else:
+#                    pairing_names, pairing_count, uuids = self.rank_zero_stuff(node_list)
+#                    chunks, node_transmissions = self.data_distribution(pairing_names)
+#            # broadcast the complete list of nodes and names to the other nodes.
+#            done = comm.bcast(done, root=0)
+#        t2 = time()
+#        self.time = t2 - t1
+#        # collect all the nodes and write some fancy stuff.
+#        sites = comm.gather(self._active_sites, root=0)
+#        if rank == 0:
+#            for i in sites:
+#                self._active_sites.update(i)
+#            return self._active_sites.values(), self._active_sites.keys() 
+#        return None, None
+#        
+#    def collect_recieve(self, node_transmissions, uuids):
+#        """Send active sites on this node that are not in pairings, collect
+#        active sites which are in pairings but not on this node."""
+#        for n_from, name, n_to in node_transmissions:
+#            tag_id = uuids[name]
+#            if rank == n_from:
+#                sending = self._active_sites.pop(name)
+#                comm.send({name:sending}, dest=n_to, tag=tag_id)
+#            elif rank == n_to:
+#                site = comm.recv(source=n_from, tag=tag_id)
+#                self._active_sites.update(site)
+#
+#
+#    def combine_pairs(self, pairings):
+#        """Combining pairs of active sites"""
+#        no_pairs = 0
+#        for (i, j) in pairings:
+#            if i is not None and j is not None:
+#                g1, g2 = self._active_sites[i[0]], self._active_sites[j[0]]
+#                p = self.get_clique(g1, g2)
+#                # check if the clique is greater than the number of
+#                # atoms according to min_cutoff
+#                if len(p) >= self.min_atom_cutoff:
+#                    #(g1 % p).debug("Pharma")
+#                    newnode = ( g1 % p )
+#                    newname = self.create_name_from_pair(i[0], j[0])
+#                    del self._active_sites[j[0]]
+#                    del self._active_sites[i[0]]
+#                    self._active_sites.update({newname:newnode})
+#                else:
+#                    no_pairs += 1
+#            elif i is None and j is None:
+#                continue
+#            elif i is None:
+#                no_pairs += 1
+#            elif j is None:
+#                no_pairs += 1
+#
+#        #print "rank %i"%rank, "pairings %i"%(len(pairings)), "no_pairs count %i"%no_pairs
+#        return no_pairs
 
 class PairDistFn(object):
     """Creates all radial distributions from a set of binding sites to
@@ -859,7 +949,10 @@ def add_to_pharmacophore(mof, pharma, path):
                     #active_site.set_elem_to_C()
                     pharma.store_active_site(active_site, 
                                              name="%s.%i"%(mof.name, site_count),
-                                             energy=el+vdw)
+                                             el_energy=el,
+                                             vdw_energy=vdw)
+                    pharma.store_co2_pos(coords,
+                                         name="%s.%i"%(mof.name, site_count))
             except KeyError:
                 print "Error, could not find the binding site energies for " + \
                       "MOF %s"%(mof.name)
@@ -902,12 +995,13 @@ def main_pharma():
     else:
         # silly hack so the sum function works in the final file 
         # writing section
-        total_site_count = [pharma.site_count, 0]
+        total_site_count = [pharma.site_count]
     if rank == 0:
         # write the pickle stuff
         total_site_count = sum(total_site_count)
         pharma.write_final_files(final_names, final_nodes, total_site_count)
         print "Finished. Scanned %i binding sites"%(total_site_count)
+        print "Reduced to %i active sites"%(len(final_nodes))
         #print "   time for initialization = %5.3f seconds"%(t2-t1)
         print "time for pharma discovery = %5.3f seconds"%(pharma.time)
         #print "                Total time = %5.3f seconds"%(t3-t1)
