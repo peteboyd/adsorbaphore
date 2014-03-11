@@ -18,12 +18,22 @@ from nets import Net
 from sub_graphs import SubGraph
 #from correspondence_graphs import CorrGraph
 sys.path.append("/home/pboyd/codes_in_development/mcqd_api/build/lib.linux-x86_64-2.7")
-sys.path.append("/home/pboyd/codes_in_development/topcryst")
-from LinAlg import rotation_from_vectors
 import _mcqd as mcqd
 
 from faps import Structure
 global rank, size, comm
+ANGS2BOHR = 1.889725989
+ATOMIC_NUMBER = [
+    "ZERO", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
+    "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn",
+    "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb",
+    "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
+    "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta",
+    "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At",
+    "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
+    "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
+    "Ds", "Rg", "Cn", "Uut", "Uuq", "Uup", "Uuh", "Uuo"]
 rank, size, comm = 0, 0, None
 try:
     from mpi4py import MPI
@@ -538,45 +548,68 @@ class Pharmacophore(object):
         return pharma_sites.values(), pharma_sites.keys()
         #return self._active_sites.values(), self._active_sites.keys() 
 
-    def obtain_pharma_error(self, name, sites):
+    def obtain_co2_distribution(self, name, sites, ngridx=10, ngridy=10, ngridz=10):
+
+        gridc = np.zeros((ngridx, ngridy, ngridz))
+        grido = np.zeros((ngridx, ngridy, ngridz))
         if not isinstance(name, tuple):
-            return 0.
+            return 0., None, None
+        _2radii = self.radii*2. + 1.
+        nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         base = self._active_sites[name[0]] % [j[0] for j in sites]
         base.shift_by_centre_of_atoms()
         mean_errors = []
         for ii in range(1, len(name)):
             atms = [q[ii] for q in sites]
             match = self._active_sites[name[ii]] % atms
+            T = match.centre_of_atoms[:3]
             match.shift_by_centre_of_atoms()
-            R = rotation_from_vectors(match._coordinates[:], 
-                                      base._coordinates[:])
-            match.rotate(R)
-            mean_errors.append(np.mean(base._coordinates - match._coordinates))
-        return np.mean(mean_errors)
-
-    def obtain_co2_distribution(self, name, sites):
-
-        grid = np.zeros((10, 10, 10))
-        if not isinstance(name, tuple):
-            return grid
-        base = self._active_sites[name[0]] % [j[0] for j in sites]
-        base.shift_by_centre_of_atoms()
-        mean_errors = []
-        for ii in range(1, len(name)):
-            atms = [q[ii] for q in sites]
-            match = self._active_sites[name[ii]] % atms
-            match.shift_by_centre_of_atoms()
-            T = match.centre_of_atoms
             R = rotation_from_vectors(match._coordinates[:], 
                                       base._coordinates[:])
             match.rotate(R)
             co2 = self._co2_sites[name[ii]]
             co2 -= T
-            co2 = np.dot(R[:3,:3], co2.T).T
+            co2 = np.dot(R[:3,:3], co2.T).T + np.array([self.radii, self.radii, self.radii])
+            inds = np.floor(co2 / np.array([nx, ny, nz])[:, None]).astype(int)
+            gridc[np.split(inds[0], 3)] += 1.
+            grido[np.split(inds[1], 3)] += 1.
+            grido[np.split(inds[2], 3)] += 1.
+
+            mean_errors.append(np.mean(base._coordinates - match._coordinates))
             # bin the x, y, and z
-            print co2
+        string_gridc = self.get_cube_format(base, gridc, len(name),
+                                                ngridx, ngridy, ngridz)
+        string_grido = self.get_cube_format(base, grido, len(name), 
+                                                ngridx, ngridy, ngridz)
+        return np.mean(mean_errors), string_gridc, string_grido
+
+    def get_cube_format(self, clique, grid, count, ngridx, ngridy, ngridz):
+        # header
+        str = "Clique containing %i binding sites\n"%count
+        str += "outer loop a, middle loop b, inner loop c\n"
+        str += "%6i %11.6f %11.6f %11.6f\n"%(len(clique), 0., 0., 0.)
+        _2radii = (self._radii*2. + 1.)*ANGS2BOHR
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, _2radii/float(ngridx), 0., 0.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., _2radii/float(ngridy), 0.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., 0., _2radii/float(ngridz))
         
-        return grid 
+        for i in range(len(clique)):
+            atm = ATOMIC_NUMBER.index(clique.elements[i])
+            coords = clique._coordinates[i]*ANGS2BOHR
+            str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., coords[0],
+                                                           coords[1], coords[2])
+
+        grid /= float(count)
+        it = np.nditer(grid, flags=['multi_index'])
+        while not it.finished:
+            for i in range(6):
+                str += " %11.6f"%it[0]
+                b_before = it.multi_index[1]
+                bool = it.iternext()
+                if not bool or (it.multi_index[1] - b_before) != 0:
+                    break
+            str += "\n"
+        return str
 
     def write_final_files(self, names, pharma_graphs, site_count): 
         pickle_dic = {}
@@ -616,9 +649,10 @@ class Pharmacophore(object):
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-            error = self.obtain_pharma_error(name, pharma)
-            co2_dist = self.obtain_co2_distribution(name, pharma)
-            co2_dist_dic[name] = co2_dist
+            error, cdist, odist = self.obtain_co2_distribution(name, pharma)
+            # only store the co2 distributions from the more important binding sites
+            if len(name) >= 100:
+                co2_dist_dic[name] = (cdist, odist) 
             f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
                                                          vdwstd,totavg,totstd,name))
 
@@ -923,6 +957,29 @@ def main():
         filename="%s_rdf.%s.csv"%(label, "O")
         write_rdf_file(filename, hist, RDF.dr)
 
+def rotation_from_vectors(v1, v2, point=None):
+    """Obtain rotation matrix from sets of vectors.
+    the original set is v1 and the vectors to rotate
+    to are v2.
+
+    """
+
+    # v2 = transformed, v1 = neutral
+    ua = np.array([np.mean(v1.T[0]), np.mean(v1.T[1]), np.mean(v1.T[2])])
+    ub = np.array([np.mean(v2.T[0]), np.mean(v2.T[1]), np.mean(v2.T[2])])
+
+    Covar = np.dot((v2 - ub).T, (v1 - ua))
+
+    u, s, v = np.linalg.svd(Covar)
+    uv = np.dot(u,v)
+    d = np.identity(3) 
+    d[2,2] = np.linalg.det(uv) # ensures non-reflected solution
+    M = np.dot(np.dot(u,d), v)
+    R = np.identity(4)
+    R[:3,:3] = M
+    if point is not None:
+        R[:3,:3] = point - np.dot(M, point)
+    return R
 def site_xyz(dic):
     f = open("binding_site.xyz", "w")
     f.writelines("%i\n"%(len(dic.keys())))
@@ -951,7 +1008,8 @@ def add_to_pharmacophore(mof, pharma, path):
                                              name="%s.%i"%(mof.name, site_count),
                                              el_energy=el,
                                              vdw_energy=vdw)
-                    pharma.store_co2_pos(coords,
+                    # shift the co2 pos so the carbon is at the origin
+                    pharma.store_co2_pos(coords-coords[0],
                                          name="%s.%i"%(mof.name, site_count))
             except KeyError:
                 print "Error, could not find the binding site energies for " + \
