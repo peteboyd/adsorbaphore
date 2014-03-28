@@ -381,7 +381,7 @@ class Pharmacophore(object):
         """
         nodes = mcqd.correspondence(g1.elements, g2.elements)
         if not nodes:
-            return []
+            return [], []
         adj_matrix = mcqd.correspondence_edges(nodes,
                                                g1.distances,
                                                g2.distances,
@@ -398,6 +398,8 @@ class Pharmacophore(object):
             return [],[]
         else:
             return [nodes[i][0] for i in clique], [nodes[i][1] for i in clique]
+        # catch-all?
+        return [], []
 
     def failed_pair(self, nameset1, nameset2):
         for i,j in itertools.product(nameset1, nameset2):
@@ -434,12 +436,15 @@ class Pharmacophore(object):
                 nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
                 g1, g2 = (asi % nodesi), (asj % nodesj)
                 p,q = self.get_clique(g1, g2)
+                # pretty sure p and q contain the wrong atom indices!
+                pp = [nodesi[x] for x in p]
+                qq = [nodesj[y] for y in q]
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
                     #(g1 % p).debug("Pharma")
-                    newnode = self.create_node_from_pair([sites[i][xx] for xx in p], 
-                                                         [sites[j][yy] for yy in q])
+                    newnode = self.create_node_from_pair([sites[i][xx] for xx in pp], 
+                                                         [sites[j][yy] for yy in qq])
                     newname = self.create_name_from_pair(i, j)
                     sites.update({newname:newnode})
                     del sites[i]
@@ -548,17 +553,44 @@ class Pharmacophore(object):
         return pharma_sites.values(), pharma_sites.keys()
         #return self._active_sites.values(), self._active_sites.keys() 
 
-    def obtain_co2_distribution(self, name, sites, ngridx=10, ngridy=10, ngridz=10):
+    def obtain_error(self, name, sites):
+        if not isinstance(name, tuple):
+            return 0.
+        base = self._active_sites[name[0]] % [j[0] for j in sites]
+        base.shift_by_centre_of_atoms()
+        mean_errors = []
+        for ii in range(1, len(name)):
+            atms = [q[ii] for q in sites]
+            match = self._active_sites[name[ii]] % atms
+            T = match.centre_of_atoms.copy()
+            match.shift_by_centre_of_atoms()
+            R = rotation_from_vectors(match._coordinates[:], 
+                                      base._coordinates[:])
+            match.rotate(R)
+            co2 = self._co2_sites[name[ii]]
+            co2 = np.dot(co2, R[:3,:3])
+            co2 += T
+            match.debug('clique%i'%ii)
+            f = open('clique%i.xyz'%ii, 'a')
+            for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
+                f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
+            f.close()
+            mean_errors.append(np.mean(base._coordinates - match._coordinates))
+
+        return np.mean(mean_errors)
+
+    def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
 
         gridc = np.zeros((ngridx, ngridy, ngridz))
         grido = np.zeros((ngridx, ngridy, ngridz))
         if not isinstance(name, tuple):
-            return 0., None, None
-        _2radii = self.radii*2. + 1.
+            return None, None
+        _2radii = self.radii*2. + 2.
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         base = self._active_sites[name[0]] % [j[0] for j in sites]
         base.shift_by_centre_of_atoms()
         mean_errors = []
+        shift_vector = np.array([self._radii, self._radii, self._radii])
         for ii in range(1, len(name)):
             atms = [q[ii] for q in sites]
             match = self._active_sites[name[ii]] % atms
@@ -566,22 +598,25 @@ class Pharmacophore(object):
             match.shift_by_centre_of_atoms()
             R = rotation_from_vectors(match._coordinates[:], 
                                       base._coordinates[:])
-            match.rotate(R)
             co2 = self._co2_sites[name[ii]]
             co2 -= T
-            co2 = np.dot(R[:3,:3], co2.T).T + np.array([self.radii, self.radii, self.radii])
-            inds = np.floor(co2 / np.array([nx, ny, nz])[:, None]).astype(int)
-            gridc[np.split(inds[0], 3)] += 1.
-            grido[np.split(inds[1], 3)] += 1.
-            grido[np.split(inds[2], 3)] += 1.
+            co2 = np.dot(R[:3,:3], co2.T).T
 
+            inds = np.floor(co2 + shift_vector / 
+                           np.array([nx, ny, nz])[:, None]).astype(int)
+            try:
+                gridc[np.split(inds[0], 3)] += 1.
+                grido[np.split(inds[1], 3)] += 1.
+                grido[np.split(inds[2], 3)] += 1.
+            except IndexError:
+                print "warning, could not include one of the binding site CO2s in the prob distribution due to distance"
             mean_errors.append(np.mean(base._coordinates - match._coordinates))
             # bin the x, y, and z
         string_gridc = self.get_cube_format(base, gridc, len(name),
                                                 ngridx, ngridy, ngridz)
         string_grido = self.get_cube_format(base, grido, len(name), 
                                                 ngridx, ngridy, ngridz)
-        return np.mean(mean_errors), string_gridc, string_grido
+        return string_gridc, string_grido
 
     def get_cube_format(self, clique, grid, count, ngridx, ngridy, ngridz):
         # header
@@ -592,10 +627,10 @@ class Pharmacophore(object):
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, _2radii/float(ngridx), 0., 0.)
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., _2radii/float(ngridy), 0.)
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., 0., _2radii/float(ngridz))
-        
+        vect = np.array([self.radii, self._radii, self._radii]) 
         for i in range(len(clique)):
             atm = ATOMIC_NUMBER.index(clique.elements[i])
-            coords = clique._coordinates[i]*ANGS2BOHR
+            coords = (clique._coordinates[i] + vect)*ANGS2BOHR
             str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., coords[0],
                                                            coords[1], coords[2])
 
@@ -649,9 +684,10 @@ class Pharmacophore(object):
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-            error, cdist, odist = self.obtain_co2_distribution(name, pharma)
+            error = self.obtain_error(name, pharma)
             # only store the co2 distributions from the more important binding sites
-            if len(name) >= 100:
+            if isinstance(name, tuple) and len(name) >= 2:
+                cdist, odist = self.obtain_co2_distribution(name, pharma)
                 co2_dist_dic[name] = (cdist, odist) 
             f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
                                                          vdwstd,totavg,totstd,name))
@@ -663,8 +699,6 @@ class Pharmacophore(object):
         f = open(filebasename+"_co2dist.pkl", 'wb')
         pickle.dump(co2_dist_dic, f)
         f.close()
-        # write an energy distribution file
-
 
 #class MPIPharmacophore(Pharmacophore, MPITools):
 #    """Each rank has it's own set of active sites, these need to be tracked for 
