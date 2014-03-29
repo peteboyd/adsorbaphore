@@ -436,16 +436,19 @@ class Pharmacophore(object):
                 nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
                 g1, g2 = (asi % nodesi), (asj % nodesj)
                 p,q = self.get_clique(g1, g2)
-                # pretty sure p and q contain the wrong atom indices!
-                pp = [nodesi[x] for x in p]
-                qq = [nodesj[y] for y in q]
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
                     #(g1 % p).debug("Pharma")
-                    newnode = self.create_node_from_pair([sites[i][xx] for xx in pp], 
-                                                         [sites[j][yy] for yy in qq])
+                    newnode = self.create_node_from_pair([sites[i][xx] for xx in p], 
+                                                         [sites[j][yy] for yy in q])
                     newname = self.create_name_from_pair(i, j)
+                    #print "NEWCLIQUE"
+                    #for ip, n in enumerate(newname):
+                    #    actvst = self._active_sites[n]
+                    #    nod = [jp[ip] for jp in newnode]
+                    #    ggg = actvst % nod
+                    #    print ggg.elements
                     sites.update({newname:newnode})
                     del sites[i]
                     del sites[j]
@@ -553,7 +556,7 @@ class Pharmacophore(object):
         return pharma_sites.values(), pharma_sites.keys()
         #return self._active_sites.values(), self._active_sites.keys() 
 
-    def obtain_error(self, name, sites):
+    def obtain_error(self, name, sites, debug_ind=0):
         if not isinstance(name, tuple):
             return 0.
         base = self._active_sites[name[0]] % [j[0] for j in sites]
@@ -564,14 +567,16 @@ class Pharmacophore(object):
             match = self._active_sites[name[ii]] % atms
             T = match.centre_of_atoms.copy()
             match.shift_by_centre_of_atoms()
-            R = rotation_from_vectors(match._coordinates[:], 
-                                      base._coordinates[:])
+            #R = rotation_from_vectors(match._coordinates[:], 
+            #                          base._coordinates[:])
+            R = rotation_from_vectors(base._coordinates[:],
+                                      match._coordinates[:]) 
             match.rotate(R)
             co2 = self._co2_sites[name[ii]]
-            co2 = np.dot(co2, R[:3,:3])
-            co2 += T
-            match.debug('clique%i'%ii)
-            f = open('clique%i.xyz'%ii, 'a')
+            co2 -= T
+            co2 = np.dot(R[:3,:3],co2.T).T
+            match.debug('clique%i'%debug_ind)
+            f = open('clique%i.xyz'%debug_ind, 'a')
             for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
                 f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
             f.close()
@@ -596,8 +601,10 @@ class Pharmacophore(object):
             match = self._active_sites[name[ii]] % atms
             T = match.centre_of_atoms[:3]
             match.shift_by_centre_of_atoms()
-            R = rotation_from_vectors(match._coordinates[:], 
-                                      base._coordinates[:])
+            #R = rotation_from_vectors(match._coordinates[:], 
+            #                          base._coordinates[:])
+            R = rotation_from_vectors(base._coordinates[:], 
+                                      match._coordinates[:])
             co2 = self._co2_sites[name[ii]]
             co2 -= T
             co2 = np.dot(R[:3,:3], co2.T).T
@@ -684,7 +691,7 @@ class Pharmacophore(object):
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-            error = self.obtain_error(name, pharma)
+            error = self.obtain_error(name, pharma, debug_ind=id)
             # only store the co2 distributions from the more important binding sites
             if isinstance(name, tuple) and len(name) >= 2:
                 cdist, odist = self.obtain_co2_distribution(name, pharma)
