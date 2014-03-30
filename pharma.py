@@ -567,22 +567,45 @@ class Pharmacophore(object):
             match = self._active_sites[name[ii]] % atms
             T = match.centre_of_atoms.copy()
             match.shift_by_centre_of_atoms()
-            #R = rotation_from_vectors(match._coordinates[:], 
-            #                          base._coordinates[:])
-            R = rotation_from_vectors(base._coordinates[:],
-                                      match._coordinates[:]) 
+            R = rotation_from_vectors(match._coordinates[:], 
+                                      base._coordinates[:])
+            #R = rotation_from_vectors(base._coordinates[:],
+            #                          match._coordinates[:]) 
             match.rotate(R)
-            co2 = self._co2_sites[name[ii]]
-            co2 -= T
-            co2 = np.dot(R[:3,:3],co2.T).T
-            match.debug('clique%i'%debug_ind)
-            f = open('clique%i.xyz'%debug_ind, 'a')
-            for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
-                f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
-            f.close()
-            mean_errors.append(np.mean(base._coordinates - match._coordinates))
-
+            #co2 = self._co2_sites[name[ii]]
+            #co2 -= T
+            #co2 = np.dot(R[:3,:3],co2.T).T
+            #match.debug('clique%i'%debug_ind)
+            #f = open('clique%i.xyz'%debug_ind, 'a')
+            #for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
+            #    f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
+            #f.close()
+            mean_errors.append(np.std((base._coordinates - match._coordinates).flatten()))
         return np.mean(mean_errors)
+
+    def get_grid_indices(self, coord, (nx, ny, nz)):
+        vect = coord / np.array([nx, ny, nz])[:, None]
+        return np.floor(vect).astype(int)
+
+    def increment_grid(self, grid, inds):
+        if len(inds.shape) == 1:
+            try:
+                grid[np.split(inds, 3)] += 1.
+            except IndexError:
+                print "Warning, could not include one of the binding sites" + \
+                " in the prob distribution due to distance"
+
+        elif len(inds.shape) == 2:
+            for i in inds:
+                try:
+                    grid[np.split(i, 3)] += 1.
+                except IndexError:
+                    print "Warning, could not include one of the binding sites" + \
+                    " in the prob distribution due to distance"
+
+        else:
+            print "WARNING: unrecognized indices passed to grid storage routine!"
+            print inds
 
     def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
 
@@ -591,33 +614,32 @@ class Pharmacophore(object):
         if not isinstance(name, tuple):
             return None, None
         _2radii = self.radii*2. + 2.
+        shift_vector = np.array([self._radii, self._radii, self._radii])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         base = self._active_sites[name[0]] % [j[0] for j in sites]
+        T = base.centre_of_atoms[:3].copy()
         base.shift_by_centre_of_atoms()
-        mean_errors = []
-        shift_vector = np.array([self._radii, self._radii, self._radii])
+        co2 = self._co2_sites[name[0]]
+        inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
+        self.increment_grid(gridc, inds[0])
+        self.increment_grid(grido, inds[1:])
+
         for ii in range(1, len(name)):
+
             atms = [q[ii] for q in sites]
             match = self._active_sites[name[ii]] % atms
-            T = match.centre_of_atoms[:3]
+            T = match.centre_of_atoms[:3].copy()
             match.shift_by_centre_of_atoms()
-            #R = rotation_from_vectors(match._coordinates[:], 
-            #                          base._coordinates[:])
-            R = rotation_from_vectors(base._coordinates[:], 
-                                      match._coordinates[:])
+            R = rotation_from_vectors(match._coordinates[:], 
+                                      base._coordinates[:])
+            #R = rotation_from_vectors(base._coordinates[:], 
+            #                          match._coordinates[:])
             co2 = self._co2_sites[name[ii]]
             co2 -= T
             co2 = np.dot(R[:3,:3], co2.T).T
-
-            inds = np.floor(co2 + shift_vector / 
-                           np.array([nx, ny, nz])[:, None]).astype(int)
-            try:
-                gridc[np.split(inds[0], 3)] += 1.
-                grido[np.split(inds[1], 3)] += 1.
-                grido[np.split(inds[2], 3)] += 1.
-            except IndexError:
-                print "warning, could not include one of the binding site CO2s in the prob distribution due to distance"
-            mean_errors.append(np.mean(base._coordinates - match._coordinates))
+            inds = self.get_grid_indices(co2+shift_vector, (nx,ny,nz))
+            self.increment_grid(gridc, inds[0])
+            self.increment_grid(grido, inds[1:])
             # bin the x, y, and z
         string_gridc = self.get_cube_format(base, gridc, len(name),
                                                 ngridx, ngridy, ngridz)
@@ -642,7 +664,7 @@ class Pharmacophore(object):
                                                            coords[1], coords[2])
 
         grid /= float(count)
-        it = np.nditer(grid, flags=['multi_index'])
+        it = np.nditer(grid, flags=['multi_index'], order='C')
         while not it.finished:
             for i in range(6):
                 str += " %11.6f"%it[0]
@@ -666,12 +688,7 @@ class Pharmacophore(object):
         f = open(filebasename+".csv", 'w')
         f.writelines("length,pharma_std,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
         for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
-            nn = name[0] if isinstance(name, tuple) else name
-            jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
             
-            site = self._active_sites[nn] % jj
-            site.shift_by_centre_of_atoms()
-            pickle_dic[name] = site 
             el, vdw, tot = [], [], []
             if isinstance(name, tuple):
                 [el.append(self.el_energy[i]) for i in name]
@@ -693,7 +710,14 @@ class Pharmacophore(object):
                 totstd = 0.
             error = self.obtain_error(name, pharma, debug_ind=id)
             # only store the co2 distributions from the more important binding sites
-            if isinstance(name, tuple) and len(name) >= 2:
+            if isinstance(name, tuple) and len(name) >= 100:
+                # store the nets, this is depreciated.. 
+                nn = name[0] if isinstance(name, tuple) else name
+                jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
+                site = self._active_sites[nn] % jj
+                site.shift_by_centre_of_atoms()
+                pickle_dic[name] = site 
+                # store the CO2 distributions
                 cdist, odist = self.obtain_co2_distribution(name, pharma)
                 co2_dist_dic[name] = (cdist, odist) 
             f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
