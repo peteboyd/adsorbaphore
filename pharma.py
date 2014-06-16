@@ -580,8 +580,11 @@ class Pharmacophore(object):
             #for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
             #    f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
             #f.close()
-            mean_errors.append(np.std((base._coordinates - match._coordinates).flatten()))
-        return np.mean(mean_errors)
+            #NB THIS MIGHT BE BIG.
+            #mean_errors.append(np.sqrt(np.mean((base._coordinates - match._coordinates)**2)))
+            for p, q in zip(base._coordinates, match._coordinates):
+                mean_errors.append((p-q)**2)
+        return np.sqrt(np.mean(mean_errors))
 
     def get_grid_indices(self, coord, (nx, ny, nz)):
         vect = coord / np.array([nx, ny, nz])[:, None]
@@ -614,7 +617,12 @@ class Pharmacophore(object):
         if not isinstance(name, tuple):
             return None, None
         _2radii = self.radii*2. + 2.
-        shift_vector = np.array([self._radii, self._radii, self._radii])
+        # Because the cube file puts the pharmacophore in the middle of the box,
+        # we need to shift the CO2 distributions to centre at the middle of the box
+        # this was originally set to the radial cutoff distance of the initial
+        # pharmacophore 
+        shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
+        #shift_vector = np.array([self._radii, self._radii, self._radii])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         base = self._active_sites[name[0]] % [j[0] for j in sites]
         T = base.centre_of_atoms[:3].copy()
@@ -652,11 +660,11 @@ class Pharmacophore(object):
         str = "Clique containing %i binding sites\n"%count
         str += "outer loop a, middle loop b, inner loop c\n"
         str += "%6i %11.6f %11.6f %11.6f\n"%(len(clique), 0., 0., 0.)
-        _2radii = (self._radii*2. + 1.)*ANGS2BOHR
-        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, _2radii/float(ngridx), 0., 0.)
-        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., _2radii/float(ngridy), 0.)
-        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., 0., _2radii/float(ngridz))
-        vect = np.array([self.radii, self._radii, self._radii]) 
+        _2radii = (self._radii*2. + 2.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, _2radii*ANGS2BOHR/float(ngridx), 0., 0.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., _2radii*ANGS2BOHR/float(ngridy), 0.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., 0., _2radii*ANGS2BOHR/float(ngridz))
+        vect = np.array([_2radii/2., _2radii/2., _2radii/2.]) 
         for i in range(len(clique)):
             atm = ATOMIC_NUMBER.index(clique.elements[i])
             coords = (clique._coordinates[i] + vect)*ANGS2BOHR
@@ -708,9 +716,8 @@ class Pharmacophore(object):
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-            error = self.obtain_error(name, pharma, debug_ind=id)
             # only store the co2 distributions from the more important binding sites
-            if isinstance(name, tuple) and len(name) >= 100:
+            if isinstance(name, tuple) and len(name) >= 50:
                 # store the nets, this is depreciated.. 
                 nn = name[0] if isinstance(name, tuple) else name
                 jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
@@ -720,6 +727,7 @@ class Pharmacophore(object):
                 # store the CO2 distributions
                 cdist, odist = self.obtain_co2_distribution(name, pharma)
                 co2_dist_dic[name] = (cdist, odist) 
+            error = self.obtain_error(name, pharma, debug_ind=id)
             f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
                                                          vdwstd,totavg,totstd,name))
 
