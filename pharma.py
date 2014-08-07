@@ -891,6 +891,7 @@ class MPIPharmacophore(Pharmacophore, MPITools):
             # send it to a global reduction
             if not self.node_done:
                 pharma_sites = self.local_tree(tree)
+                no_pairs = 0
             else:
                 # actual clique finding
                 pop_nodes = [ps for ps in pharma_sites.keys() if ps not in pairing_nodes] 
