@@ -504,20 +504,11 @@ class Pharmacophore(object):
         for i, j in pairings:
             pairing_count += 1
             if i is not None and j is not None:
-                try:
-                    pairing_names.append((node_list[i], node_list[j]))
-                except IndexError:
-                    pass
+                pairing_names.append((node_list[i], node_list[j]))
             elif i is None and j is not None:
-                try:
-                    pairing_names.append((None, node_list[j]))
-                except IndexError:
-                    pass
+                pairing_names.append((None, node_list[j]))
             elif j is None and i is not None:
-                try:
-                    pairing_names.append((node_list[i], None))
-                except IndexError:
-                    pass
+                pairing_names.append((node_list[i], None))
             else:
                 pairing_names.append((None, None))
         return pairing_names, pairing_count
