@@ -816,7 +816,10 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         if node_list:
             node_list = [j for i in node_list for j in i]
             uuids = self.assign_unique_ids(node_list)
-            pairings = tree.branchify(pharma_sites.keys()) # initial pairing up of active sites
+            pairings = tree.branchify(pharma_sites.keys())
+            print "length of pairings = %i"%len(pairings)
+            print "length of node_list = %i"%len(node_list)
+            print "length of pharma_sites = %i"%len(pharma_sites.keys())
             pairing_names, pairing_count = self.gen_pairing_names(pairings, pharma_sites.keys())
         return pairing_names, pairing_count, uuids
 
@@ -857,8 +860,18 @@ class MPIPharmacophore(Pharmacophore, MPITools):
             self.collect_recieve(node_transmissions, uuids)
             to_root = self.generate_node_list()
             node_list = comm.gather(to_root, root=0)
+            # have to determine which sites are not being paired in this node, 
+            # then delete these sites before sending the list back to node 0
+            pairing_nodes = []
+            for k, l in pairings:
+                pairing_nodes.append(k)
+                pairing_nodes.append(l)
+            pop_nodes = [ps for ps in pharma_sites.keys() if ps not in pairing_nodes] 
+            
             # actual clique finding
             no_pairs, pharma_sites = self.combine_pairs(pairings, pharma_sites)
+            [pharma_sites.pop(ps) for ps in pop_nodes]
+
             pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
             no_pairs = comm.gather(no_pairs, root=0)
             if MPIrank == 0:
