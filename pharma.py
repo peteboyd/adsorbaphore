@@ -518,7 +518,6 @@ class Pharmacophore(object):
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
         while not done:
             # loop over pairings, each successive pairing should narrow down the active sites
-            print node_list
             no_pairs, pharma_sites = self.combine_pairs(pairing_names, pharma_sites)
             # count the number of times no pairings were made
             if no_pairs == pairing_count:
@@ -793,10 +792,6 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         # shitty hack for making the last node do nothing
         for i in range(MPIsize-len(chunks)):
             chunks.append([(None,None)])
-        #print "number of unique sites for transmission = %i"%(len(dupes.keys()))
-        #print "number of sites transmitting = %i"%(len(node_transmissions.keys()))
-        #print "keeping on the same node = %i"%(len(keep.keys()))
-        #print "total sites = %i"%(len(node_transmissions.keys()) + len(keep.keys()))
         return chunks, node_transmissions.values() 
         # need to tell the nodes where to send and recieve their
         # active sites.
@@ -812,9 +807,6 @@ class MPIPharmacophore(Pharmacophore, MPITools):
             psort = sorted(pharma_sites.keys())
             uuids = self.assign_unique_ids(node_list)
             pairings = tree.branchify(psort)
-            #print "length of pairings = %i"%len(pairings)
-            #print "length of node_list = %i"%len(node_list)
-            #print "length of pharma_sites = %i"%len(pharma_sites.keys())
             pairing_names, pairing_count = self.gen_pairing_names(pairings, psort)
         return pairing_names, pairing_count, uuids, node_list
 
@@ -829,8 +821,6 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         t1 = time()
         pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
         pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
-        #if MPIrank == 0:
-        #    print "number of sites: %i"%(len(pharma_sites.keys()))
         to_root = self.generate_node_list()
         # collect list of nodes and all energies to the mother node. 
         node_list = comm.gather(to_root, root=0)
@@ -1031,7 +1021,6 @@ def main():
     directory = MOFDiscovery(_MOF_STRING)
     directory.dir_scan()
     for mof, path in directory.mof_dirs:
-        #print mof
         binding_sites = BindingSiteDiscovery(path)
         if binding_sites.absl_calc_exists():
             binding_sites.co2_xyz_parser()
