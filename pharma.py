@@ -329,6 +329,7 @@ class Pharmacophore(object):
         self.time = 0.
         self.tol = tol
         self.grid = (10, 10, 10)
+        self.node_done = False # for MPI implementation
         # initialize a random seed (for testing purposes)
         if random_seed is None:
             # make the seed time-based, but still be able to recover what it
@@ -810,6 +811,40 @@ class MPIPharmacophore(Pharmacophore, MPITools):
             pairing_names, pairing_count = self.gen_pairing_names(pairings, psort)
         return pairing_names, pairing_count, uuids, node_list
 
+    def local_tree(self, tree):
+        """This is just the serial version of the tree"""
+        done = False
+        t1 = time()
+        tree = Tree()
+        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
+        node_list = sorted(pharma_sites.keys())
+        pairings = tree.branchify(node_list) # initial pairing up of active sites
+        pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
+        pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
+        while not done:
+            # loop over pairings, each successive pairing should narrow down the active sites
+            no_pairs, pharma_sites = self.combine_pairs(pairing_names, pharma_sites)
+            # count the number of times no pairings were made
+            if no_pairs == pairing_count:
+                pass_count += 1
+            # TESTME(pboyd): This may really slow down the routine.
+            else:
+                # re-set if some good sites were found
+                pass_count = 0
+            # TESTME(pboyd)
+            if pass_count == self.max_pass_count or pairings is None:
+                done = True
+            else:
+                node_list = sorted(pharma_sites.keys())
+                pairings = tree.branchify(node_list)
+                
+                pairing_names, pairing_count = self.gen_pairing_names(pairings, 
+                                                                      node_list)
+        t2 = time()
+        self.time = t2 - t1
+        self.node_done = True
+        return pharma_sites 
+
     def run_pharma_tree(self):
         """Take all active sites and join them randomly. This is a breadth
         first reverse-tree algorithm."""
@@ -851,12 +886,16 @@ class MPIPharmacophore(Pharmacophore, MPITools):
             for k, l in pairings:
                 pairing_nodes.append(k)
                 pairing_nodes.append(l)
-            pop_nodes = [ps for ps in pharma_sites.keys() if ps not in pairing_nodes] 
             
-            # actual clique finding
-            no_pairs, pharma_sites = self.combine_pairs(pairings, pharma_sites)
-            [pharma_sites.pop(ps) for ps in pop_nodes]
-
+            # Do a local reduction of sites until no reductions can be done.. then
+            # send it to a global reduction
+            if not self.node_done:
+                pharma_sites = self.local_tree(tree)
+            else:
+                # actual clique finding
+                pop_nodes = [ps for ps in pharma_sites.keys() if ps not in pairing_nodes] 
+                no_pairs, pharma_sites = self.combine_pairs(pairings, pharma_sites)
+                [pharma_sites.pop(ps) for ps in pop_nodes]
             pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
             no_pairs = comm.gather(no_pairs, root=0)
             if MPIrank == 0:
