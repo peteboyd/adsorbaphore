@@ -335,7 +335,6 @@ class Pharmacophore(object):
             # is for tracking purposes
             self.seed = random.randint(0, sys.maxint)
         else:
-            random.seed(random_seed)
             self.seed = random_seed
         # set the random seed
         random.seed(self.seed)
@@ -441,16 +440,9 @@ class Pharmacophore(object):
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
-                    #(g1 % p).debug("Pharma")
                     newnode = self.create_node_from_pair([sites[i][xx] for xx in p], 
                                                          [sites[j][yy] for yy in q])
                     newname = self.create_name_from_pair(i, j)
-                    #print "NEWCLIQUE"
-                    #for ip, n in enumerate(newname):
-                    #    actvst = self._active_sites[n]
-                    #    nod = [jp[ip] for jp in newnode]
-                    #    ggg = actvst % nod
-                    #    print ggg.elements
                     sites.update({newname:newnode})
                     del sites[i]
                     del sites[j]
@@ -459,7 +451,7 @@ class Pharmacophore(object):
                     no_pairs += 1
             # in cases where the number of active sites is odd,
             # the itertools function will produce a pair that has
-            # (int, None). This is to account for that.
+            # (int, None). The following is to account for that.
             # mpi routines will sometimes send (None, None)'s if 
             # the number of nodes is greater than the number of pairs
             # to compute.. 
@@ -519,16 +511,16 @@ class Pharmacophore(object):
         done = False
         t1 = time()
         tree = Tree()
-        node_list = self._active_sites.keys()
+        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
+        node_list = sorted(pharma_sites.keys())
         pairings = tree.branchify(node_list) # initial pairing up of active sites
         pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
-        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
         while not done:
             # loop over pairings, each successive pairing should narrow down the active sites
+            print node_list
             no_pairs, pharma_sites = self.combine_pairs(pairing_names, pharma_sites)
             # count the number of times no pairings were made
-            pairings = tree.branchify(node_list)
             if no_pairs == pairing_count:
                 pass_count += 1
             # TESTME(pboyd): This may really slow down the routine.
@@ -539,7 +531,8 @@ class Pharmacophore(object):
             if pass_count == self.max_pass_count or pairings is None:
                 done = True
             else:
-                node_list = pharma_sites.keys()
+                node_list = sorted(pharma_sites.keys())
+                pairings = tree.branchify(node_list)
                 
                 pairing_names, pairing_count = self.gen_pairing_names(pairings, 
                                                                       node_list)
@@ -765,7 +758,6 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         # hence the dictionary to remove any redundancy.
         node_transmissions = {}
         keep = {}
-        node_list = [j for i in node_list for j in i]
         sz = int(math.ceil(float(len(list(pairing_names)))/ float(MPIsize)))
         if sz == 0:
             sz = 1
@@ -801,10 +793,10 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         # shitty hack for making the last node do nothing
         for i in range(MPIsize-len(chunks)):
             chunks.append([(None,None)])
-        print "number of unique sites for transmission = %i"%(len(dupes.keys()))
-        print "number of sites transmitting = %i"%(len(node_transmissions.keys()))
-        print "keeping on the same node = %i"%(len(keep.keys()))
-        print "total sites = %i"%(len(node_transmissions.keys()) + len(keep.keys()))
+        #print "number of unique sites for transmission = %i"%(len(dupes.keys()))
+        #print "number of sites transmitting = %i"%(len(node_transmissions.keys()))
+        #print "keeping on the same node = %i"%(len(keep.keys()))
+        #print "total sites = %i"%(len(node_transmissions.keys()) + len(keep.keys()))
         return chunks, node_transmissions.values() 
         # need to tell the nodes where to send and recieve their
         # active sites.
@@ -814,14 +806,17 @@ class MPIPharmacophore(Pharmacophore, MPITools):
 
     def rank_zero_stuff(self, tree, pharma_sites, node_list):
         if node_list:
+            # the list is sorted so that the results of a parallel run will coincide with that of 
+            # a serial run using the same random seed.
             node_list = [j for i in node_list for j in i]
+            psort = sorted(pharma_sites.keys())
             uuids = self.assign_unique_ids(node_list)
-            pairings = tree.branchify(pharma_sites.keys())
-            print "length of pairings = %i"%len(pairings)
-            print "length of node_list = %i"%len(node_list)
-            print "length of pharma_sites = %i"%len(pharma_sites.keys())
-            pairing_names, pairing_count = self.gen_pairing_names(pairings, pharma_sites.keys())
-        return pairing_names, pairing_count, uuids
+            pairings = tree.branchify(psort)
+            #print "length of pairings = %i"%len(pairings)
+            #print "length of node_list = %i"%len(node_list)
+            #print "length of pharma_sites = %i"%len(pharma_sites.keys())
+            pairing_names, pairing_count = self.gen_pairing_names(pairings, psort)
+        return pairing_names, pairing_count, uuids, node_list
 
     def run_pharma_tree(self):
         """Take all active sites and join them randomly. This is a breadth
@@ -834,8 +829,8 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         t1 = time()
         pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
         pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
-        if MPIrank == 0:
-            print "number of sites: %i"%(len(pharma_sites.keys()))
+        #if MPIrank == 0:
+        #    print "number of sites: %i"%(len(pharma_sites.keys()))
         to_root = self.generate_node_list()
         # collect list of nodes and all energies to the mother node. 
         node_list = comm.gather(to_root, root=0)
@@ -843,7 +838,7 @@ class MPIPharmacophore(Pharmacophore, MPITools):
         # maybe a smart way is to minimize the number of mpi send/recv calls by sending
         # pairs off to nodes which possess one or more of the sites already.
         if MPIrank == 0:
-            pairing_names, pairing_count, uuids = self.rank_zero_stuff(tree, pharma_sites, node_list)
+            pairing_names, pairing_count, uuids, node_list = self.rank_zero_stuff(tree, pharma_sites, node_list)
             chunks, node_transmissions = self.data_distribution(pairing_names, node_list)
 
         done = False
@@ -887,18 +882,15 @@ class MPIPharmacophore(Pharmacophore, MPITools):
                 if pass_count == self.max_pass_count:
                     done = True
                 else:
-                    pairing_names, pairing_count, uuids = self.rank_zero_stuff(tree, pharma_sites, node_list)
+                    pairing_names, pairing_count, uuids, node_list = self.rank_zero_stuff(tree, pharma_sites, node_list)
                     chunks, node_transmissions = self.data_distribution(pairing_names, node_list)
             # broadcast the complete list of nodes and names to the other nodes.
             done = comm.bcast(done, root=0)
         t2 = time()
         self.time = t2 - t1
         # collect all the nodes and write some fancy stuff.
-        sites = comm.gather(self._active_sites, root=0)
         if MPIrank == 0:
-            for i in sites:
-                self._active_sites.update(i)
-            return self._active_sites.values(), self._active_sites.keys() 
+            return pharma_sites.values(), pharma_sites.keys() 
         return None, None
    
     def collect_broadcast_dictionary(self, dict):
@@ -1158,10 +1150,10 @@ def main_pharma():
         # silly hack so the sum function works in the final file 
         # writing section
         total_site_count = [pharma.site_count]
-    if rank == 0:
+    if MPIrank == 0:
         # write the pickle stuff
         total_site_count = sum(total_site_count)
-        pharma.write_final_files(final_names, final_nodes, total_site_count)
+        #pharma.write_final_files(final_names, final_nodes, total_site_count)
         print "Finished. Scanned %i binding sites"%(total_site_count)
         print "Reduced to %i active sites"%(len(final_nodes))
         #print "   time for initialization = %5.3f seconds"%(t2-t1)
