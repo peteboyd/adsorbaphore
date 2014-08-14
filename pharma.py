@@ -13,6 +13,8 @@ import numpy as np
 import random
 from random import shuffle
 from scipy.spatial import distance
+import subprocess
+from StringIO import StringIO
 from math import pi
 from nets import Net
 from sub_graphs import SubGraph
@@ -20,7 +22,16 @@ from sub_graphs import SubGraph
 sys.path.append("/home/pboyd/codes_in_development/mcqd_api/build/lib.linux-x86_64-2.7")
 import _mcqd as mcqd
 
-from faps import Structure
+from faps import Structure, Atom, Cell, mk_gcmc_control, Guest
+from config_fap import Options
+
+#SQL stuff
+
+from sqlalchemy import create_engine
+from sqlalchemy import Table, Column, Integer, Float, String, Text, ForeignKey
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.ext.declarative import declarative_base
+
 global MPIrank, MPIsize, comm
 ANGS2BOHR = 1.889725989
 ATOMIC_NUMBER = [
@@ -313,6 +324,80 @@ class NetLoader(dict):
         f = open(file, 'rb')
         self.update(pickle.load(f))
 
+class Fastmc_run(object):
+    """Compute a single point energy from a FASTMC job"""
+    def __init__(self, supercell=(1, 1, 1)):
+        self._fmcexe = '/home/pboyd/codes_in_development/fastmc/gcmc.x'
+        self.options = Options()
+        self._set_options(supercell)
+        self.struct = Structure(name='pharma')
+
+    def _set_options(self, supercell):
+        hack = '[job_config]\n'
+        hack += 'mc_zero_charges = False\n'
+        hack += 'mc_supercell = (%i, %i, %i)\n'%(supercell)
+        hack += 'mc_cutoff = 12.5\n'
+        hack += 'mc_prod_steps = 1\n'
+        hack += 'mc_eq_steps = 1\n'
+        hack += 'mc_numguests_freq = 1\n'
+        hack += 'mc_history_freq = 1\n'
+        hack += 'mc_jobcontrol = False\n'
+        hack += 'mc_probability_plot = False\n'
+        hack += 'fold = False\n'
+        hack += 'mc_probability_plot_spacing = 0.1'
+        hack = StringIO(hack)
+        self.options.job_ini.readfp(hack)
+        self.guest_dic = {}
+
+    def add_guest(self, position):
+        guest = Guest(ident='CO2')
+        self.struct.guests = [guest]
+        self.guest_dic = {guest.ident: [position]}
+
+    def add_fragment(self, net_obj, lattice):
+        cell = Cell()
+        cell._cell = np.array(lattice)
+        self.struct.cell = cell
+        for id, (elem, posi) in enumerate(zip(net_obj.elements, net_obj._coordinates)):
+            atom = Atom(at_type=elem, pos=posi, parent=self.struct, charge=net_obj.charges[id])
+            self.struct.atoms.append(atom)
+
+    def run_fastmc(self):
+        config, field = self.struct.to_config_field(self.options, fastmc=True, include_guests=self.guest_dic)
+        control = mk_gcmc_control(298.0, 0.15, self.options, self.struct.guests)
+        control.pop(-1)
+        control.append('single point\nfinish')
+        file = open("CONFIG", "w")
+        file.writelines(config)
+        file.close()
+        file = open("CONTROL", "w")
+        file.writelines(control)
+        file.close()
+        file = open("FIELD", "w")
+        file.writelines(field)
+        file.close()
+        p = subprocess.Popen([self._fmcexe], stdout=subprocess.PIPE)
+        q = p.communicate()
+
+    def obtain_energy(self):
+        outfile = open('OUTPUT', 'r')
+        outlines = outfile.readlines()
+        outfile.close()
+        vdw = 0.
+        elstat = 0.
+        for line in outlines:
+            if 'van der Waals energy :' in line:
+                vdw = float(line.split()[5])
+            elif 'Electrostatic energy :' in line:
+                elstat = float(line.split()[3])
+        return vdw, elstat
+
+    def clean(self):
+        os.remove("CONFIG")
+        os.remove("CONTROL")
+        os.remove("FIELD")
+        os.remove("OUTPUT")
+
 class Pharmacophore(object):
 
     """Grab atoms surrounding binding sites. compare with maximal clique detection."""
@@ -326,6 +411,7 @@ class Pharmacophore(object):
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
         self.max_pass_count = max_pass_count 
         self.min_atom_cutoff = min_atom_cutoff
+        self.lattices = {}  # store the lattice information for energetic calculations at the end of the run.
         self.time = 0.
         self.tol = tol
         self.grid = (10, 10, 10)
@@ -350,9 +436,10 @@ class Pharmacophore(object):
     def get_main_graph(self, faps_obj):
         """Takes a structure object and converts to a sub_graph using
         routines borrowed from net_finder."""
+        self.lattices[faps_obj.name] = faps_obj.cell.cell
         s = SubGraph(name=faps_obj.name)
         # in the future, determine the size of the supercell which would fit the radii property
-        s.from_faps(faps_obj, supercell=(2,2,2))
+        s.from_faps(faps_obj, supercell=(3,3,3))
         return s
     
     def get_active_site(self, binding_site, subgraph):
@@ -576,10 +663,13 @@ class Pharmacophore(object):
         vect = coord / np.array([nx, ny, nz])[:, None]
         return np.floor(vect).astype(int)
 
-    def increment_grid(self, grid, inds):
+    def increment_grid(self, grid, inds, en=None):
         if len(inds.shape) == 1:
             try:
-                grid[np.split(inds, 3)] += 1.
+                if en is None:
+                    grid[np.split(inds, 3)] += 1.
+                else:
+                    grid[np.split(inds, 3)] += en
             except IndexError:
                 print "Warning, could not include one of the binding sites" + \
                 " in the prob distribution due to distance"
@@ -587,7 +677,11 @@ class Pharmacophore(object):
         elif len(inds.shape) == 2:
             for i in inds:
                 try:
-                    grid[np.split(i, 3)] += 1.
+                    if en is None:
+                        grid[np.split(i, 3)] += 1.
+                    else:
+                        grid[np.split(i, 3)] += en 
+
                 except IndexError:
                     print "Warning, could not include one of the binding sites" + \
                     " in the prob distribution due to distance"
@@ -595,11 +689,31 @@ class Pharmacophore(object):
         else:
             print "WARNING: unrecognized indices passed to grid storage routine!"
             print inds
+    
+    def obtain_co2_fragment_energies(self, nn, ss):
+        #nn = name[id]
+        #ss = [j[id] for j in sites]
+        mofname = '.'.join(nn.split('.')[:-1])
+        cell = (self.lattices[mofname].T * np.array([5.,5.,5.])).T
+        fastmc = Fastmc_run(supercell=(1,1,1))
+        fastmc.add_guest(self._co2_sites[nn])
+        fastmc.add_fragment(self._active_sites[nn] % ss, cell)
+        fastmc.run_fastmc()
+        vdw, el = fastmc.obtain_energy()
+        total_vdw = self.vdw_energy[nn]
+        total_el = self.el_energy[nn]
+        fastmc.clean()
+        return vdw*4.184/total_vdw, el*4.184/total_el
 
     def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
 
         gridc = np.zeros((ngridx, ngridy, ngridz))
         grido = np.zeros((ngridx, ngridy, ngridz))
+
+        gridevdw = np.zeros((ngridx, ngridy, ngridz))
+        grideel = np.zeros((ngridx, ngridy, ngridz))
+        gridevdwcount = np.zeros((ngridx, ngridy, ngridz))
+        grideelcount = np.zeros((ngridx, ngridy, ngridz))
         if not isinstance(name, tuple):
             return None, None
         _2radii = self.radii*2. + 2.
@@ -617,6 +731,9 @@ class Pharmacophore(object):
         inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
         self.increment_grid(gridc, inds[0])
         self.increment_grid(grido, inds[1:])
+        evdw, eel = self.obtain_co2_fragment_energies(name[0], [j[0] for j in sites])
+        self.increment_grid(gridevdw, inds[0], en=evdw)
+        self.increment_grid(grideel, inds[0], en=eel)
 
         for ii in range(1, len(name)):
 
@@ -634,12 +751,21 @@ class Pharmacophore(object):
             inds = self.get_grid_indices(co2+shift_vector, (nx,ny,nz))
             self.increment_grid(gridc, inds[0])
             self.increment_grid(grido, inds[1:])
+            evdw, eel = self.obtain_co2_fragment_energies(name[ii], atms)
+            self.increment_grid(gridevdw, inds[0], en=evdw)
+            self.increment_grid(grideel, inds[0], en=eel)
+            self.increment_grid(gridevdwcount, inds[0])
+            self.increment_grid(grideelcount, inds[0]) 
             # bin the x, y, and z
-        string_gridc = self.get_cube_format(base, gridc, len(name),
+        string_gridc = self.get_cube_format(base, gridc, float(len(name)),
                                                 ngridx, ngridy, ngridz)
-        string_grido = self.get_cube_format(base, grido, len(name), 
+        string_grido = self.get_cube_format(base, grido, float(len(name)), 
                                                 ngridx, ngridy, ngridz)
-        return string_gridc, string_grido
+        string_gridevdw = self.get_cube_format(base, gridevdw, gridevdwcount,
+                                                ngridx, ngridy, ngridz)
+        string_grideel = self.get_cube_format(base, grideel, grideelcount,
+                                                ngridx, ngridy, ngridz)
+        return string_gridc, string_grido, string_gridevdw, string_grideel
 
     def get_cube_format(self, clique, grid, count, ngridx, ngridy, ngridz):
         # header
@@ -657,7 +783,7 @@ class Pharmacophore(object):
             str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., coords[0],
                                                            coords[1], coords[2])
 
-        grid /= float(count)
+        grid /= count
         it = np.nditer(grid, flags=['multi_index'], order='C')
         while not it.finished:
             for i in range(6):
@@ -669,10 +795,11 @@ class Pharmacophore(object):
             str += "\n"
         return str
 
-    def write_final_files(self, names, pharma_graphs, site_count): 
-        pickle_dic = {}
-        co2_pos_dic = {}
-        co2_dist_dic = {}
+
+    def write_final_files(self, names, pharma_graphs, site_count):
+        #pickle_dic = {}
+        #co2_pos_dic = {}
+        #co2_dist_dic = {}
         filebasename='%s_N.%i_r.%3.2f_ac.%i_ma.%i_rs.%i_t.%3.2f'%("pharma",
                                                  site_count,
                                                  self.radii,
@@ -680,8 +807,11 @@ class Pharmacophore(object):
                                                  self.max_pass_count,
                                                  self.seed,
                                                  self.tol)
-        f = open(filebasename+".csv", 'w')
-        f.writelines("length,pharma_std,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
+        #f = open(filebasename+".csv", 'w')
+        data_storage = Data_Storage(filebasename)
+        ranking = []
+        datas = {}
+        #f.writelines("length,pharma_std,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
         for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
             
             el, vdw, tot = [], [], []
@@ -696,45 +826,102 @@ class Pharmacophore(object):
                 vdwstd = np.std(vdw)
                 totavg = np.mean(tot)
                 totstd = np.std(tot)
+                pharma_length = len(name)
             else:
+                pharma_length = 1
                 elavg = self.el_energy[name] 
                 elstd = 0. 
                 vdwavg = self.vdw_energy[name]
                 vdwstd = 0. 
                 totavg = self.vdw_energy[name] + self.el_energy[name]
                 totstd = 0.
-            # only store the co2 distributions from the more important binding sites
-            if isinstance(name, tuple) and len(name) >= 50:
+            sql = SQL_Pharma(str(name), vdwavg, vdwstd, elavg, elstd, pharma_length)
+            ranking.append((pharma_length, str(name)))
+            # only store the co2 distributions from the more important binding sites, currently set to
+            # 0.1 % of the number of original binding sites
+            error = self.obtain_error(name, pharma, debug_ind=id)
+            sql.set_error(error)
+            if isinstance(name, tuple) and pharma_length >= int(site_count*0.001):
                 # store the nets, this is depreciated.. 
                 nn = name[0] if isinstance(name, tuple) else name
                 jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
                 site = self._active_sites[nn] % jj
                 #site.shift_by_centre_of_atoms()
-                pickle_dic[name] = site 
+                #pickle_dic[name] = site 
                 # store the CO2 distributions
                 cdist, odist = self.obtain_co2_distribution(name, pharma)
-                co2_dist_dic[name] = (cdist, odist)
-                co2s = []
+                evdwdist, eeldist = self.obtain_co2_fragment_energies(name, pharma)
+                sql.set_probs(cdist, odist, evdwdist, eeldist)
+                #co2_dist_dic[name] = (cdist, odist)
                 # compute the energy distribution from the extracted site (function of radii)
-                # some function to generate a fastmc input file
-                # some function to run fastmc and await completion
-                # some function to parse the OUTPUT file to get the energy
-                # some function to tidy up the files. [tot.append(self.vdw_energy[i]+self.el_energy[i]) for i in name]
+
+            datas{str(name)} = sql
+            #f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
+            #                                             vdwstd,totavg,totstd,name))
+
+        for rank, (length, name) in enumerate(reversed(sorted(ranking))):
+            sqlr = datas[name]
+            sqlr.set_rank(rank)
+            data_storage.store_pharma(sqlr)
+        #f.close()
+        #f = open(filebasename+".pkl", 'wb')
+        #pickle.dump(pickle_dic, f)
+        #f.close()
+        #f = open(filebasename+"_co2dist.pkl", 'wb')
+        #pickle.dump(co2_dist_dic, f)
+        #f.close()
+
+class SQL_Pharma(Base):
+    """SQLAlchemy model for the resulting pharmacophores"""
+    __tablename__ = 'pharmacophores'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    rank = Column(Integer)
+    length = Column(Integer)
+    c_prob = Column(Text)
+    o_prob = Column(Text)
+    vdw_dist = Column(Text)
+    el_dist = Column(Text)
+    vdwe_av = Column(Float)
+    vdwe_std = Column(Float)
+    ele_av = Column(Float)
+    ele_std = Column(Float)
+    error = Column(Float)
+
+    def __init__(self, name, vdwe_av, vdwe_std, ele_av, ele_std, length):
+        self.name = name
+        self.vdwe_av = vdwe_av
+        self.vdwe_std = vdwe_std
+        self.ele_av = ele_av
+        self.ele_std = ele_std
+        self.length = length
+
+    def set_rank(self, rank):
+        self.rank = rank
+
+    def set_error(self, error):
+        self.error = error
+
+    def set_probs(self, c_prob, o_prob, vdw_dist, el_dist):
+        self.c_prob = c_prob
+        self.o_prob = o_prob
+        self.vdw_dist = vdw_dist
+        self.el_dist = el_dist
 
 
-                # compute the energy contribution from the pharmacophore?
-                    
-            error = self.obtain_error(name, pharma, debug_ind=id)
-            f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
-                                                         vdwstd,totavg,totstd,name))
+class Data_Storage(Base):
+    """Container for each pharmacophore. Contains all properties calculated for each pharma"""
 
-        f.close()
-        f = open(filebasename+".pkl", 'wb')
-        pickle.dump(pickle_dic, f)
-        f.close()
-        f = open(filebasename+"_co2dist.pkl", 'wb')
-        pickle.dump(co2_dist_dic, f)
-        f.close()
+    __tablename__ = "pharmacophore_data"
+    def __init__(self, db_name):
+        self.engine = create_engine('sqlite:///%s.db'%(db_name))
+        Base.metadata.create_all(self.engine)
+        Session = sessionmaker(bind=self.engine)
+        self.session = Session()
+
+    def store_pharma(self, sql_pharma):
+        self.session.add(sql_pharma)
+        self.session.commit()
 
 class MPIPharmacophore(Pharmacophore, MPITools):
     """Each rank has it's own set of active sites, these need to be tracked for 
@@ -1182,7 +1369,7 @@ def main_pharma():
     if MPIrank == 0:
         # write the pickle stuff
         total_site_count = sum(total_site_count)
-        #pharma.write_final_files(final_names, final_nodes, total_site_count)
+        pharma.write_final_files(final_names, final_nodes, total_site_count)
         print "Finished. Scanned %i binding sites"%(total_site_count)
         print "Reduced to %i active sites"%(len(final_nodes))
         #print "   time for initialization = %5.3f seconds"%(t2-t1)
