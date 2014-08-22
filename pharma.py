@@ -32,6 +32,21 @@ from sqlalchemy import Table, Column, Integer, Float, String, Text, ForeignKey
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 
+Base = declarative_base()
+
+atom_associations = Table('atom_associations',
+                          Base.metadata,
+                          Column('active_site_name', Text,
+                                 ForeignKey('active_sites.name')),
+                          Column('atom_name', Text,
+                                 ForeignKey('active_site_atoms.name')))
+
+distance_associations = Table('distance_associations',
+                              Base.metadata,
+                              Column('active_site_name', Text,
+                                     ForeignKey('active_sites.name')),
+                              Column('distance_matrix_name', Text,
+                                     ForeignKey('distance_matrix.name')))
 global MPIrank, MPIsize, comm
 ANGS2BOHR = 1.889725989
 ATOMIC_NUMBER = [
@@ -387,9 +402,17 @@ class Fastmc_run(object):
         elstat = 0.
         for line in outlines:
             if 'van der Waals energy :' in line:
-                vdw = float(line.split()[5])
+                try:
+                    vdw = float(line.split()[5])
+                except IndexError:
+                    print "Warning! could not get the vdw energy from one of the runs"
+                    vdw = 0.
             elif 'Electrostatic energy :' in line:
-                elstat = float(line.split()[3])
+                try:
+                    elstat = float(line.split()[3])
+                except IndexError:
+                    print "Warning! could not get the electrostatic energy from one of the runs"
+                    elstat = 0.
         return vdw, elstat
 
     def clean(self):
@@ -406,6 +429,7 @@ class Pharmacophore(object):
         self.el_energy = {}
         self.vdw_energy = {}
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
+        self.pharma_sites = {} # key: active site name (mofname.[int]) val: range of graph size
         self._co2_sites = {}
         self._radii = radii # radii to scan for active site atoms
         self._bad_pair = {} # store all binding site pairs which did not result in a pharmacophore
@@ -425,6 +449,7 @@ class Pharmacophore(object):
             self.seed = random_seed
         # set the random seed
         random.seed(self.seed)
+        self.sql_active_sites = Data_Storage("active_sites") 
 
     @property
     def radii(self):
@@ -456,12 +481,27 @@ class Pharmacophore(object):
 
     def store_active_site(self, activesite, name='Default', el_energy=0., vdw_energy=0.):
         self.site_count += 1
-        self.el_energy[name] = el_energy
-        self.vdw_energy[name] = vdw_energy
-        self._active_sites[name] = activesite
+        #self.el_energy[name] = el_energy
+        #self.vdw_energy[name] = vdw_energy
+        #self._active_sites[name] = range(len(activesite)) # activesite
+        self.pharma_sites[name] = range(len(activesite))
 
+        s = SQL_ActiveSite(name, len(activesite), vdw_energy, el_energy)
+        self.sql_active_sites.store(s)
+        for id, element in enumerate(activesite.elements):
+            charge = activesite.charges[id]
+            pos = activesite._coordinates[id]
+            s = SQL_ActiveSiteAtoms(pos, element, charge, id, name)
+            self.sql_active_sites.store(s)
+
+        for (x, y), dist in np.ndenumerate(activesite._dmatrix):
+            s = SQL_Distances(x, y, dist, name)
+            self.sql_active_sites.store(s)
+    
     def store_co2_pos(self, pos, name='Default'):
-        self._co2_sites[name] = pos
+        #self._co2_sites[name] = pos
+        s = SQL_ActiveSiteCO2(name, pos)
+        self.sql_active_sites.store(s)
 
     def get_clique(self, g1, g2):
         """Returns the atoms in g1 which constitute a maximal clique
@@ -514,6 +554,57 @@ class Pharmacophore(object):
     def get_rep_nodes(self, name, sites):
         return [i if isinstance(i, int) else i[0] for i in sites[name]]
 
+    def get_active_site_from_sql(self, name):
+        sqlas = self.sql_active_sites.get_active_site(name)
+        # convert to subgraph
+        #graph = SubGraph(name=sqlas.name)
+        #graph.elements = range(sqlas.size)
+        #graph.charges = range(sqlas.size)
+        #graph._orig_index = range(sqlas.size)
+        #graph._new_index = range(sqlas.size)
+        #graph._coordinates = np.empty((sqlas.size, 3))
+        #graph._dmatrix = np.empty((sqlas.size, sqlas.size))
+        #for atom in sqlas.atoms:
+        #    coord = np.array([atom.x, atom.y, atom.z])
+        #    graph._coordinates[atom.orig_id] = coord
+        #    graph.elements[atom.orig_id] = atom.elem
+        #    graph.charges[atom.orig_id] = atom.charge
+        #for dist in sqlas.distances:
+        #    graph._dmatrix[dist.row,dist.col] = dist.dist
+
+        co2 = np.empty((3,3))
+        sqlco2 = sqlas.co2[0]
+        co2[0][0] = sqlco2.cx
+        co2[0][1] = sqlco2.cy
+        co2[0][2] = sqlco2.cz
+        co2[1][0] = sqlco2.o1x
+        co2[1][1] = sqlco2.o1y
+        co2[1][2] = sqlco2.o1z
+        co2[2][0] = sqlco2.o2x
+        co2[2][1] = sqlco2.o2y
+        co2[2][2] = sqlco2.o2z
+
+        return co2, sqlas.vdweng, sqlas.eleng
+    
+    def get_active_site_graph_from_sql(self, name):
+        sqlas = self.sql_active_sites.get_active_site(name)
+        # convert to subgraph
+        graph = SubGraph(name=sqlas.name)
+        graph.elements = range(sqlas.size)
+        graph.charges = range(sqlas.size)
+        graph._orig_index = range(sqlas.size)
+        graph._new_index = range(sqlas.size)
+        graph._coordinates = np.empty((sqlas.size, 3))
+        graph._dmatrix = np.empty((sqlas.size, sqlas.size))
+        for atom in sqlas.atoms:
+            coord = np.array([atom.x, atom.y, atom.z])
+            graph._coordinates[atom.orig_id] = coord
+            graph.elements[atom.orig_id] = atom.elem
+            graph.charges[atom.orig_id] = atom.charge
+        for dist in sqlas.distances:
+            graph._dmatrix[dist.row,dist.col] = dist.dist
+        return graph
+
     def combine_pairs(self, pairings, sites):
         """Combining pairs of active sites"""
         no_pairs = 0
@@ -521,7 +612,21 @@ class Pharmacophore(object):
             if i is not None and j is not None:
                 # get the representative names, representative atoms
                 namei, namej = self.get_rep_site_name(i), self.get_rep_site_name(j)
-                asi, asj = self._active_sites[namei], self._active_sites[namej]
+                # get these from SQL DB.
+
+                #asi, qq, qq, qq = self.get_active_site_from_sql(namei)
+                #asj, qq, qq, qq = self.get_active_site_from_sql(namej)
+                try:
+                    asi = self._active_sites[namei]
+                except KeyError:
+                    asi = self.get_active_site_graph_from_sql(namei)
+                    self._active_sites[namei] = asi
+                try:
+                    asj = self._active_sites[namej]
+                except KeyError:
+                    asj = self.get_active_site_graph_from_sql(namej)
+                    self._active_sites[namej] = asj
+
                 nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
                 g1, g2 = (asi % nodesi), (asj % nodesj)
                 p,q = self.get_clique(g1, g2)
@@ -534,6 +639,10 @@ class Pharmacophore(object):
                     sites.update({newname:newnode})
                     del sites[i]
                     del sites[j]
+                    # note - the new node will have site [namei] as the representative
+                    # so we delete site [namej] for memory purposes
+                    del self._active_sites[namej]
+
                 # append to the bad_pair dictionary otherwise
                 else:
                     no_pairs += 1
@@ -599,7 +708,8 @@ class Pharmacophore(object):
         done = False
         t1 = time()
         tree = Tree()
-        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
+        #pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
+        pharma_sites = self.pharma_sites
         node_list = sorted(pharma_sites.keys())
         pairings = tree.branchify(node_list) # initial pairing up of active sites
         pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
@@ -632,12 +742,22 @@ class Pharmacophore(object):
     def obtain_error(self, name, sites, debug_ind=0):
         if not isinstance(name, tuple):
             return 0.
-        base = self._active_sites[name[0]] % [j[0] for j in sites]
+        #site, qq, qq, qq = self.get_active_site_from_sql(name[0])
+        try:
+            site = self._active_sites[name[0]]
+        except KeyError:
+            site = self.get_active_site_graph_from_sql(name[0])
+        base = site % [j[0] for j in sites]
         base.shift_by_centre_of_atoms()
         mean_errors = []
         for ii in range(1, len(name)):
             atms = [q[ii] for q in sites]
-            match = self._active_sites[name[ii]] % atms
+            #site, qq, qq, qq = self.get_active_site_from_sql(name[ii])
+            try:
+                site = self._active_sites[name[ii]]
+            except KeyError:
+                site = self.get_active_site_graph_from_sql(name[ii])
+            match = site % atms
             T = match.centre_of_atoms.copy()
             match.shift_by_centre_of_atoms()
             R = rotation_from_vectors(match._coordinates[:], 
@@ -690,30 +810,30 @@ class Pharmacophore(object):
             print "WARNING: unrecognized indices passed to grid storage routine!"
             print inds
     
-    def obtain_co2_fragment_energies(self, nn, ss):
+    def obtain_co2_fragment_energies(self, name, site, co2):
         #nn = name[id]
         #ss = [j[id] for j in sites]
-        mofname = '.'.join(nn.split('.')[:-1])
+        mofname = '.'.join(name.split('.')[:-1])
         cell = (self.lattices[mofname].T * np.array([5.,5.,5.])).T
         fastmc = Fastmc_run(supercell=(1,1,1))
-        fastmc.add_guest(self._co2_sites[nn])
-        fastmc.add_fragment(self._active_sites[nn] % ss, cell)
+        fastmc.add_guest(co2)
+        fastmc.add_fragment(site, cell)
         fastmc.run_fastmc()
         vdw, el = fastmc.obtain_energy()
-        total_vdw = self.vdw_energy[nn]
-        total_el = self.el_energy[nn]
         fastmc.clean()
-        return vdw*4.184/total_vdw, el*4.184/total_el
+        return vdw*4.184, el*4.184
 
     def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
 
         gridc = np.zeros((ngridx, ngridy, ngridz))
         grido = np.zeros((ngridx, ngridy, ngridz))
 
-        gridevdw = np.zeros((ngridx, ngridy, ngridz))
-        grideel = np.zeros((ngridx, ngridy, ngridz))
-        gridevdwcount = np.zeros((ngridx, ngridy, ngridz))
-        grideelcount = np.zeros((ngridx, ngridy, ngridz))
+        #gridevdw = np.zeros((ngridx, ngridy, ngridz))
+        #grideel = np.zeros((ngridx, ngridy, ngridz))
+        gride = np.zeros((ngridx, ngridy, ngridz))
+        #gridevdwcount = np.ones((ngridx, ngridy, ngridz))
+        #grideelcount = np.ones((ngridx, ngridy, ngridz))
+        gridecount = np.ones((ngridx, ngridy, ngridz))
         if not isinstance(name, tuple):
             return None, None
         _2radii = self.radii*2. + 2.
@@ -724,50 +844,69 @@ class Pharmacophore(object):
         shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
         #shift_vector = np.array([self._radii, self._radii, self._radii])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
-        base = self._active_sites[name[0]] % [j[0] for j in sites]
+        co2, vdweng, eleng = self.get_active_site_from_sql(name[0])
+        try:
+            site = self._active_sites[name[0]]
+        except KeyError:
+            site = self.get_active_site_graph_from_sql(name[0])
+        #co2 = self._co2_sites[name[0]]
+        base = site % [j[0] for j in sites]
         T = base.centre_of_atoms[:3].copy()
         base.shift_by_centre_of_atoms()
-        co2 = self._co2_sites[name[0]]
         inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
         self.increment_grid(gridc, inds[0])
         self.increment_grid(grido, inds[1:])
-        evdw, eel = self.obtain_co2_fragment_energies(name[0], [j[0] for j in sites])
-        self.increment_grid(gridevdw, inds[0], en=evdw)
-        self.increment_grid(grideel, inds[0], en=eel)
+        evdw, eel = self.obtain_co2_fragment_energies(name[0], base, co2)
+        #evdw /= vdweng
+        #eel /= eleng
+        #self.increment_grid(gridevdw, inds[0], en=evdw)
+        #self.increment_grid(grideel, inds[0], en=eel)
+        self.increment_grid(gride, inds[0], en=eel+evdw)
 
         for ii in range(1, len(name)):
 
             atms = [q[ii] for q in sites]
-            match = self._active_sites[name[ii]] % atms
+            co2, vdweng, eleng = self.get_active_site_from_sql(name[ii])
+            try:
+                site = self._active_sites[name[ii]]
+            except KeyError:
+                site = self.get_active_site_graph_from_sql(name[ii])
+            match = site % atms
             T = match.centre_of_atoms[:3].copy()
             match.shift_by_centre_of_atoms()
             R = rotation_from_vectors(match._coordinates[:], 
                                       base._coordinates[:])
             #R = rotation_from_vectors(base._coordinates[:], 
             #                          match._coordinates[:])
-            co2 = self._co2_sites[name[ii]].copy()
+            #co2 = self._co2_sites[name[ii]].copy()
             co2 -= T
             co2 = np.dot(R[:3,:3], co2.T).T
             inds = self.get_grid_indices(co2+shift_vector, (nx,ny,nz))
             self.increment_grid(gridc, inds[0])
             self.increment_grid(grido, inds[1:])
-            evdw, eel = self.obtain_co2_fragment_energies(name[ii], atms)
-            self.increment_grid(gridevdw, inds[0], en=evdw)
-            self.increment_grid(grideel, inds[0], en=eel)
-            self.increment_grid(gridevdwcount, inds[0])
-            self.increment_grid(grideelcount, inds[0]) 
+            evdw, eel = self.obtain_co2_fragment_energies(name[ii], match, co2)
+            #evdw /= vdweng
+            #eel /= eleng
+            #self.increment_grid(gridevdw, inds[0], en=evdw)
+            #self.increment_grid(grideel, inds[0], en=eel)
+            self.increment_grid(gride, inds[0], en=eel+evdw)
+            #self.increment_grid(gridevdwcount, inds[0])
+            #self.increment_grid(grideelcount, inds[0]) 
+            self.increment_grid(gridecount, inds[0]) 
             # bin the x, y, and z
-        string_gridc = self.get_cube_format(base, gridc, float(len(name)),
+        string_gridc = self.get_cube_format(base, gridc, len(name), float(len(name)),
                                                 ngridx, ngridy, ngridz)
-        string_grido = self.get_cube_format(base, grido, float(len(name)), 
+        string_grido = self.get_cube_format(base, grido, len(name), float(len(name)), 
                                                 ngridx, ngridy, ngridz)
-        string_gridevdw = self.get_cube_format(base, gridevdw, gridevdwcount,
-                                                ngridx, ngridy, ngridz)
-        string_grideel = self.get_cube_format(base, grideel, grideelcount,
-                                                ngridx, ngridy, ngridz)
-        return string_gridc, string_grido, string_gridevdw, string_grideel
+        #string_gridevdw = self.get_cube_format(base, gridevdw, len(name), gridevdwcount,
+        #                                        ngridx, ngridy, ngridz)
+        #string_grideel = self.get_cube_format(base, grideel, len(name), grideelcount,
+        #                                        ngridx, ngridy, ngridz)
+        string_gride = self.get_cube_format(base, gride, len(name), gridecount,
+                                            ngridx, ngridy, ngridz)
+        return string_gridc, string_grido, string_gride #string_gridevdw, string_grideel
 
-    def get_cube_format(self, clique, grid, count, ngridx, ngridy, ngridz):
+    def get_cube_format(self, clique, grid, count, avg, ngridx, ngridy, ngridz):
         # header
         str = "Clique containing %i binding sites\n"%count
         str += "outer loop a, middle loop b, inner loop c\n"
@@ -783,7 +922,7 @@ class Pharmacophore(object):
             str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., coords[0],
                                                            coords[1], coords[2])
 
-        grid /= count
+        grid /= avg 
         it = np.nditer(grid, flags=['multi_index'], order='C')
         while not it.finished:
             for i in range(6):
@@ -816,9 +955,12 @@ class Pharmacophore(object):
             
             el, vdw, tot = [], [], []
             if isinstance(name, tuple):
-                [el.append(self.el_energy[i]) for i in name]
-                [vdw.append(self.vdw_energy[i]) for i in name]
-                [tot.append(self.vdw_energy[i]+self.el_energy[i]) for i in name]
+                for n in name:
+                    co2, vdw_en, el_en = self.get_active_site_from_sql(n)
+
+                    el.append(el_en)
+                    vdw.append(vdw_en)
+                    tot.append(el_en+vdw_en)
 
                 elavg = np.mean(el)
                 elstd = np.std(el)
@@ -829,11 +971,13 @@ class Pharmacophore(object):
                 pharma_length = len(name)
             else:
                 pharma_length = 1
-                elavg = self.el_energy[name] 
+                co2, vdw_en, el_en = self.get_active_site_from_sql(name)
+                
+                elavg = el_en 
                 elstd = 0. 
-                vdwavg = self.vdw_energy[name]
+                vdwavg = vdw_en 
                 vdwstd = 0. 
-                totavg = self.vdw_energy[name] + self.el_energy[name]
+                totavg = el_en + vdw_en 
                 totstd = 0.
             sql = SQL_Pharma(str(name), vdwavg, vdwstd, elavg, elstd, pharma_length)
             ranking.append((pharma_length, str(name)))
@@ -842,27 +986,24 @@ class Pharmacophore(object):
             error = self.obtain_error(name, pharma, debug_ind=id)
             sql.set_error(error)
             if isinstance(name, tuple) and pharma_length >= int(site_count*0.001):
-                # store the nets, this is depreciated.. 
-                nn = name[0] if isinstance(name, tuple) else name
-                jj = [i[0] if isinstance(i, tuple) else i for i in pharma]
-                site = self._active_sites[nn] % jj
+                # store the nets, this is depreciated..
                 #site.shift_by_centre_of_atoms()
                 #pickle_dic[name] = site 
                 # store the CO2 distributions
-                cdist, odist = self.obtain_co2_distribution(name, pharma)
-                evdwdist, eeldist = self.obtain_co2_fragment_energies(name, pharma)
-                sql.set_probs(cdist, odist, evdwdist, eeldist)
+                cdist, odist, edist = self.obtain_co2_distribution(name, pharma)
+                sql.set_probs(cdist, odist, edist)
                 #co2_dist_dic[name] = (cdist, odist)
                 # compute the energy distribution from the extracted site (function of radii)
 
-            datas{str(name)} = sql
+            datas[str(name)] = sql
             #f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
             #                                             vdwstd,totavg,totstd,name))
 
         for rank, (length, name) in enumerate(reversed(sorted(ranking))):
             sqlr = datas[name]
             sqlr.set_rank(rank)
-            data_storage.store_pharma(sqlr)
+            data_storage.store(sqlr)
+        data_storage.flush()
         #f.close()
         #f = open(filebasename+".pkl", 'wb')
         #pickle.dump(pickle_dic, f)
@@ -880,8 +1021,9 @@ class SQL_Pharma(Base):
     length = Column(Integer)
     c_prob = Column(Text)
     o_prob = Column(Text)
-    vdw_dist = Column(Text)
-    el_dist = Column(Text)
+    #vdw_dist = Column(Text)
+    #el_dist = Column(Text)
+    e_dist = Column(Text)
     vdwe_av = Column(Float)
     vdwe_std = Column(Float)
     ele_av = Column(Float)
@@ -902,26 +1044,110 @@ class SQL_Pharma(Base):
     def set_error(self, error):
         self.error = error
 
-    def set_probs(self, c_prob, o_prob, vdw_dist, el_dist):
-        self.c_prob = c_prob
-        self.o_prob = o_prob
-        self.vdw_dist = vdw_dist
-        self.el_dist = el_dist
+    def set_probs(self, c_prob, o_prob, e_dist):
+        #self.c_prob = c_prob
+        #self.o_prob = o_prob
+        #self.vdw_dist = vdw_dist
+        #self.el_dist = el_dist
+        self.e_dist = e_dist
 
 
-class Data_Storage(Base):
+class SQL_ActiveSiteAtoms(Base):
+    __tablename__ = "active_site_atoms"
+    id = Column(Integer, primary_key=True)
+    x = Column(Float)
+    y = Column(Float)
+    z = Column(Float)
+    elem = Column(Text)
+    charge = Column(Float)
+    orig_id = Column(Integer)
+    name = Column(Text, ForeignKey('active_sites.name'))
+
+    def __init__(self, pos, elem, charge, id, name):
+        self.x = pos[0]
+        self.y = pos[1]
+        self.z = pos[2]
+        self.elem = elem
+        self.charge = charge
+        self.orig_id = id
+        self.name = name
+
+class SQL_ActiveSite(Base):
+    __tablename__ = "active_sites"
+    id = Column(Integer, primary_key=True)
+    size = Column(Integer)
+    vdweng = Column(Float)
+    eleng = Column(Float)
+    name = Column(Text)
+    atoms = relationship('SQL_ActiveSiteAtoms',backref='active_sites')
+    distances = relationship('SQL_Distances',backref='active_sites')
+    co2 = relationship('SQL_ActiveSiteCO2', backref='carbon_dioxide')
+
+    def __init__(self, name, size, vdweng, eleng):
+        self.name = name
+        self.size = size
+        self.vdweng = vdweng
+        self.eleng = eleng
+
+class SQL_Distances(Base):
+    __tablename__ = "distance_matrix"
+    id = Column(Integer, primary_key=True)
+    row = Column(Integer)
+    col = Column(Integer)
+    dist = Column(Float)
+    name = Column(Text, ForeignKey('active_sites.name'))
+
+    def __init__(self, row, column, dist, name):
+        self.row = row
+        self.col = column
+        self.dist = dist
+        self.name = name
+
+class SQL_ActiveSiteCO2(Base):
+    __tablename__ = "carbon_dioxide"
+    id = Column(Integer, primary_key=True)
+    name = Column(Text, ForeignKey('active_sites.name'))
+    cx = Column(Float)
+    cy = Column(Float)
+    cz = Column(Float)
+    o1x = Column(Float)
+    o1y = Column(Float)
+    o1z = Column(Float)
+    o2x = Column(Float)
+    o2y = Column(Float)
+    o2z = Column(Float)
+    
+    def __init__(self, name, pos):
+        self.name = name
+        self.cx = pos[0][0]
+        self.cy = pos[0][1]
+        self.cz = pos[0][2]
+        self.o1x = pos[1][0]
+        self.o1y = pos[1][1]
+        self.o1z = pos[1][2]
+        self.o2x = pos[2][0]
+        self.o2y = pos[2][1]
+        self.o2z = pos[2][2]
+
+
+class Data_Storage(object):
     """Container for each pharmacophore. Contains all properties calculated for each pharma"""
 
-    __tablename__ = "pharmacophore_data"
     def __init__(self, db_name):
         self.engine = create_engine('sqlite:///%s.db'%(db_name))
         Base.metadata.create_all(self.engine)
         Session = sessionmaker(bind=self.engine)
         self.session = Session()
 
-    def store_pharma(self, sql_pharma):
+    def store(self, sql_pharma):
         self.session.add(sql_pharma)
+
+    def flush(self):
+        self.session.flush()
         self.session.commit()
+
+    def get_active_site(self, name):
+        return self.session.query(SQL_ActiveSite).filter(SQL_ActiveSite.name == name).first()
 
 class MPIPharmacophore(Pharmacophore, MPITools):
     """Each rank has it's own set of active sites, these need to be tracked for 
@@ -1349,11 +1575,16 @@ def main_pharma():
         directory = MOFDiscovery(options.search_path)
     directory.dir_scan(max_mofs=options.nmofs)
     # split if mpi.
+    mofcount = 0
     for mof, path in directory.mof_dirs:
         if mof:
+            mofcount += 1
             faps_mof = Structure(name=mof)
             faps_mof.from_cif(os.path.join(path, mof+".cif"))
             add_to_pharmacophore(faps_mof, pharma, path)
+            if mofcount % 100 == 0:
+                pharma.sql_active_sites.flush()
+    pharma.sql_active_sites.flush()
     t2 = time()
     #if rank==0:
     #    print "number of binding sites = %i"%(pharma.site_count)
