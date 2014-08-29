@@ -6,7 +6,6 @@ import sys
 import pickle
 import math
 from optparse import OptionParser
-from post_processing import Fastmc_run
 import itertools
 import networkx as nx
 from time import time
@@ -30,6 +29,8 @@ from config_fap import Options
 from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
 #MPI stuff
 from mpi import MPIPharmacophore, MPIMOFDiscovery
+#Data analysis stuff
+from post_processing import Fastmc_run, PairDistFn
 
 global MPIrank, MPIsize, comm
 ANGS2BOHR = 1.889725989
