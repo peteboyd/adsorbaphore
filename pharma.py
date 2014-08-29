@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 
 import os
+import shutil
 import sys
 import pickle
 import math
 from optparse import OptionParser
+from post_processing import Fastmc_run
 import itertools
 import networkx as nx
 from time import time
@@ -14,7 +16,6 @@ import random
 from random import shuffle
 from scipy.spatial import distance
 import subprocess
-from StringIO import StringIO
 from math import pi
 from nets import Net
 from sub_graphs import SubGraph
@@ -26,27 +27,10 @@ from faps import Structure, Atom, Cell, mk_gcmc_control, Guest
 from config_fap import Options
 
 #SQL stuff
+from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
+#MPI stuff
+from mpi import MPIPharmacophore, MPIMOFDiscovery
 
-from sqlalchemy import create_engine
-from sqlalchemy import Table, Column, Integer, Float, String, Text, ForeignKey
-from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
-
-atom_associations = Table('atom_associations',
-                          Base.metadata,
-                          Column('active_site_name', Text,
-                                 ForeignKey('active_sites.name')),
-                          Column('atom_name', Text,
-                                 ForeignKey('active_site_atoms.name')))
-
-distance_associations = Table('distance_associations',
-                              Base.metadata,
-                              Column('active_site_name', Text,
-                                     ForeignKey('active_sites.name')),
-                              Column('distance_matrix_name', Text,
-                                     ForeignKey('distance_matrix.name')))
 global MPIrank, MPIsize, comm
 ANGS2BOHR = 1.889725989
 ATOMIC_NUMBER = [
@@ -60,23 +44,6 @@ ATOMIC_NUMBER = [
     "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
     "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
     "Ds", "Rg", "Cn", "Uut", "Uuq", "Uup", "Uuh", "Uuo"]
-rank, size, comm = 0, 0, None
-try:
-    from mpi4py import MPI
-    comm = MPI.COMM_WORLD
-    MPIrank = comm.Get_rank()
-    MPIsize = comm.Get_size()
-except ImportError:
-    print "Warning! no module named mpi4py found, I hope you are not running this in parallel!"
-    pass
-
-class MPITools(object):
-    
-    def chunks(self, l, n):
-        """yield successive n-sized chunks from l."""
-        for i in xrange(0, len(l), n):
-            yield l[i:i+n]
-    
 class CommandLine(object):
     """Parse command line options and communicate directives to the program."""
 
@@ -140,16 +107,28 @@ class CommandLine(object):
                           "so be sure to set this value to the highest possible base directory "+
                           "where the binding sites can be located. Default is set to "+
                           "'/share/scratch/pboyd/binding_sites/'")
+        parser.add_option("--en_max", action="store",
+                          type="float",
+                          default=0.0,
+                          dest="en_max",
+                          help="Set the maximum energy cutoff of the binding sites to select and "+
+                          "compare with. The default value is 0. "+
+                          "Only binding sites with energies below this value will be considered.")
+        parser.add_option("--en_min", action="store",
+                          type="float",
+                          default=-np.inf,
+                          dest="en_min",
+                          help="Set the minimum energy cutoff of the binding sites to select and "+
+                          "compare with. The default value is -inf. "+
+                          "Only binding sites with energies above this value will be considered.")
+
         parser.add_option("--mpi", action="store_true",
                           default=False,
                           dest="MPI",
-                          help="Toggle the parallel version of the code. Default serial.")
+                          help="Toggle the parallel version of the code. Default serial. "+
+                          "***DEPRECIATED*** - found to be too slow in the current implementation.")
         (local_options, local_args) = parser.parse_args()
         self.options = local_options
-
-class Plot(object):
-    def __init__(self):
-        pass
 
 class MOFDiscovery(object):
     def __init__(self, directory):
@@ -183,31 +162,6 @@ class MOFDiscovery(object):
 
         """
         return dir.startswith(self.mof_def) and not dir.endswith("_absl")
-
-class MPIMOFDiscovery(MOFDiscovery, MPITools):
-    
-    def dir_scan(self, max_mofs=None):
-        chunks, ranks = None, None
-        if MPIrank == 0:
-            f = open("MOFs_used.csv", "w")
-            count = 0 
-            for root, directories, filenames in os.walk(self.directory):
-                mofdir = os.path.basename(root)
-                if self._valid_mofdir(mofdir):
-                    f.writelines("%s\n"%mofdir)
-                    self.mof_dirs.append((mofdir,root))
-                    count += 1
-                if (max_mofs is not None) and (count == max_mofs):
-                    break
-            f.close()
-            sz = int(math.ceil(float(len(self.mof_dirs)) / float(MPIsize)))
-            ranks, chunks = [], []
-            for rr, ch in enumerate(self.chunks(self.mof_dirs, sz)):
-                ranks += [rr for i in range(len(ch))]
-                chunks.append(ch)
-            for kk in range(MPIsize - len(chunks)):
-                chunks.append(tuple([(None, [])]))
-        self.mof_dirs = comm.scatter(chunks, root=0)
 
 class Tree(object):
     """Tree creates a pairwise iteration technique for pairing and narrowing
@@ -331,88 +285,6 @@ class BindingSiteDiscovery(object):
             if file_line == '# site total binding (KJ/mol) noncovalent (kJ/mol) elec (KJ/mol)':
                 read = True
 
-class Fastmc_run(object):
-    """Compute a single point energy from a FASTMC job"""
-    def __init__(self, supercell=(1, 1, 1)):
-        self._fmcexe = '/home/pboyd/codes_in_development/fastmc/gcmc.x'
-        self.options = Options()
-        self._set_options(supercell)
-        self.struct = Structure(name='pharma')
-
-    def _set_options(self, supercell):
-        hack = '[job_config]\n'
-        hack += 'mc_zero_charges = False\n'
-        hack += 'mc_supercell = (%i, %i, %i)\n'%(supercell)
-        hack += 'mc_cutoff = 12.5\n'
-        hack += 'mc_prod_steps = 1\n'
-        hack += 'mc_eq_steps = 1\n'
-        hack += 'mc_numguests_freq = 1\n'
-        hack += 'mc_history_freq = 1\n'
-        hack += 'mc_jobcontrol = False\n'
-        hack += 'mc_probability_plot = False\n'
-        hack += 'fold = False\n'
-        hack += 'mc_probability_plot_spacing = 0.1'
-        hack = StringIO(hack)
-        self.options.job_ini.readfp(hack)
-        self.guest_dic = {}
-
-    def add_guest(self, position):
-        guest = Guest(ident='CO2')
-        self.struct.guests = [guest]
-        self.guest_dic = {guest.ident: [position]}
-
-    def add_fragment(self, net_obj, lattice):
-        cell = Cell()
-        cell._cell = np.array(lattice)
-        self.struct.cell = cell
-        for id, (elem, posi) in enumerate(zip(net_obj.elements, net_obj._coordinates)):
-            atom = Atom(at_type=elem, pos=posi, parent=self.struct, charge=net_obj.charges[id])
-            self.struct.atoms.append(atom)
-
-    def run_fastmc(self):
-        config, field = self.struct.to_config_field(self.options, fastmc=True, include_guests=self.guest_dic)
-        control = mk_gcmc_control(298.0, 0.15, self.options, self.struct.guests)
-        control.pop(-1)
-        control.append('single point\nfinish')
-        file = open("CONFIG", "w")
-        file.writelines(config)
-        file.close()
-        file = open("CONTROL", "w")
-        file.writelines(control)
-        file.close()
-        file = open("FIELD", "w")
-        file.writelines(field)
-        file.close()
-        p = subprocess.Popen([self._fmcexe], stdout=subprocess.PIPE)
-        q = p.communicate()
-
-    def obtain_energy(self):
-        outfile = open('OUTPUT', 'r')
-        outlines = outfile.readlines()
-        outfile.close()
-        vdw = 0.
-        elstat = 0.
-        for line in outlines:
-            if 'van der Waals energy :' in line:
-                try:
-                    vdw = float(line.split()[5])
-                except IndexError:
-                    print "Warning! could not get the vdw energy from one of the runs"
-                    vdw = 0.
-            elif 'Electrostatic energy :' in line:
-                try:
-                    elstat = float(line.split()[3])
-                except IndexError:
-                    print "Warning! could not get the electrostatic energy from one of the runs"
-                    elstat = 0.
-        return vdw, elstat
-
-    def clean(self):
-        os.remove("CONFIG")
-        os.remove("CONTROL")
-        os.remove("FIELD")
-        os.remove("OUTPUT")
-
 class Pharmacophore(object):
 
     """Grab atoms surrounding binding sites. compare with maximal clique detection."""
@@ -470,7 +342,6 @@ class Pharmacophore(object):
         site = subgraph % sub_idx
         site.shift_by_vector(binding_site[0])
         return site 
-
     def store_active_site(self, activesite, name='Default', el_energy=0., vdw_energy=0.):
         self.site_count += 1
         #self.el_energy[name] = el_energy
@@ -492,6 +363,11 @@ class Pharmacophore(object):
     
     def store_co2_pos(self, pos, name='Default'):
         #self._co2_sites[name] = pos
+        #print "Name: %s"%(name)
+        #print "pos = C (%12.5f, %12.5f, %12.5f)"%(tuple(pos[0]))
+        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(pos[1]))
+        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(pos[2]))
+
         s = SQL_ActiveSiteCO2(name, pos)
         self.sql_active_sites.store(s)
 
@@ -575,7 +451,10 @@ class Pharmacophore(object):
         co2[2][0] = sqlco2.o2x
         co2[2][1] = sqlco2.o2y
         co2[2][2] = sqlco2.o2z
-
+        #print "Name: %s"%(name)
+        #print "pos = C (%12.5f, %12.5f, %12.5f)"%(tuple(co2[0]))
+        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(co2[1]))
+        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(co2[2]))
         return co2, sqlas.vdweng, sqlas.eleng
     
     def get_active_site_graph_from_sql(self, name):
@@ -706,9 +585,13 @@ class Pharmacophore(object):
         pairings = tree.branchify(node_list) # initial pairing up of active sites
         pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
         pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
+        flush_count = 0
         while not done:
+            flush_count += 1
             # loop over pairings, each successive pairing should narrow down the active sites
             no_pairs, pharma_sites = self.combine_pairs(pairing_names, pharma_sites)
+            if (flush_count % 1000 == 0):
+                self.sql_active_sites.flush()
             # count the number of times no pairings were made
             if no_pairs == pairing_count:
                 pass_count += 1
@@ -802,7 +685,7 @@ class Pharmacophore(object):
             print "WARNING: unrecognized indices passed to grid storage routine!"
             print inds
     
-    def obtain_co2_fragment_energies(self, name, site, co2):
+    def obtain_co2_fragment_energies(self, name, site, co2, i=0):
         #nn = name[id]
         #ss = [j[id] for j in sites]
         mofname = '.'.join(name.split('.')[:-1])
@@ -812,7 +695,7 @@ class Pharmacophore(object):
         fastmc.add_fragment(site, cell)
         fastmc.run_fastmc()
         vdw, el = fastmc.obtain_energy()
-        fastmc.clean()
+        fastmc.clean(i)
         return vdw*4.184, el*4.184
 
     def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
@@ -848,7 +731,7 @@ class Pharmacophore(object):
         inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
         self.increment_grid(gridc, inds[0])
         self.increment_grid(grido, inds[1:])
-        evdw, eel = self.obtain_co2_fragment_energies(name[0], base, co2)
+        evdw, eel = self.obtain_co2_fragment_energies(name[0], base, co2-T, 0)
         #evdw /= vdweng
         #eel /= eleng
         #self.increment_grid(gridevdw, inds[0], en=evdw)
@@ -870,13 +753,14 @@ class Pharmacophore(object):
                                       base._coordinates[:])
             #R = rotation_from_vectors(base._coordinates[:], 
             #                          match._coordinates[:])
+            match.rotate(R)
             #co2 = self._co2_sites[name[ii]].copy()
             co2 -= T
             co2 = np.dot(R[:3,:3], co2.T).T
-            inds = self.get_grid_indices(co2+shift_vector, (nx,ny,nz))
+            inds = self.get_grid_indices((co2+shift_vector), (nx,ny,nz))
             self.increment_grid(gridc, inds[0])
             self.increment_grid(grido, inds[1:])
-            evdw, eel = self.obtain_co2_fragment_energies(name[ii], match, co2)
+            evdw, eel = self.obtain_co2_fragment_energies(name[ii], match, co2, ii)
             #evdw /= vdweng
             #eel /= eleng
             #self.increment_grid(gridevdw, inds[0], en=evdw)
@@ -1004,361 +888,6 @@ class Pharmacophore(object):
         #pickle.dump(co2_dist_dic, f)
         #f.close()
 
-class SQL_Pharma(Base):
-    """SQLAlchemy model for the resulting pharmacophores"""
-    __tablename__ = 'pharmacophores'
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    rank = Column(Integer)
-    length = Column(Integer)
-    c_prob = Column(Text)
-    o_prob = Column(Text)
-    #vdw_dist = Column(Text)
-    #el_dist = Column(Text)
-    e_dist = Column(Text)
-    vdwe_av = Column(Float)
-    vdwe_std = Column(Float)
-    ele_av = Column(Float)
-    ele_std = Column(Float)
-    error = Column(Float)
-
-    def __init__(self, name, vdwe_av, vdwe_std, ele_av, ele_std, length):
-        self.name = name
-        self.vdwe_av = vdwe_av
-        self.vdwe_std = vdwe_std
-        self.ele_av = ele_av
-        self.ele_std = ele_std
-        self.length = length
-
-    def set_rank(self, rank):
-        self.rank = rank
-
-    def set_error(self, error):
-        self.error = error
-
-    def set_probs(self, c_prob, o_prob, e_dist):
-        #self.c_prob = c_prob
-        #self.o_prob = o_prob
-        #self.vdw_dist = vdw_dist
-        #self.el_dist = el_dist
-        self.e_dist = e_dist
-
-
-class SQL_ActiveSiteAtoms(Base):
-    __tablename__ = "active_site_atoms"
-    id = Column(Integer, primary_key=True)
-    x = Column(Float)
-    y = Column(Float)
-    z = Column(Float)
-    elem = Column(Text)
-    charge = Column(Float)
-    orig_id = Column(Integer)
-    name = Column(Text, ForeignKey('active_sites.name'))
-
-    def __init__(self, pos, elem, charge, id, name):
-        self.x = pos[0]
-        self.y = pos[1]
-        self.z = pos[2]
-        self.elem = elem
-        self.charge = charge
-        self.orig_id = id
-        self.name = name
-
-class SQL_ActiveSite(Base):
-    __tablename__ = "active_sites"
-    id = Column(Integer, primary_key=True)
-    size = Column(Integer)
-    vdweng = Column(Float)
-    eleng = Column(Float)
-    name = Column(Text)
-    atoms = relationship('SQL_ActiveSiteAtoms',backref='active_sites')
-    distances = relationship('SQL_Distances',backref='active_sites')
-    co2 = relationship('SQL_ActiveSiteCO2', backref='carbon_dioxide')
-
-    def __init__(self, name, size, vdweng, eleng):
-        self.name = name
-        self.size = size
-        self.vdweng = vdweng
-        self.eleng = eleng
-
-class SQL_Distances(Base):
-    __tablename__ = "distance_matrix"
-    id = Column(Integer, primary_key=True)
-    row = Column(Integer)
-    col = Column(Integer)
-    dist = Column(Float)
-    name = Column(Text, ForeignKey('active_sites.name'))
-
-    def __init__(self, row, column, dist, name):
-        self.row = row
-        self.col = column
-        self.dist = dist
-        self.name = name
-
-class SQL_ActiveSiteCO2(Base):
-    __tablename__ = "carbon_dioxide"
-    id = Column(Integer, primary_key=True)
-    name = Column(Text, ForeignKey('active_sites.name'))
-    cx = Column(Float)
-    cy = Column(Float)
-    cz = Column(Float)
-    o1x = Column(Float)
-    o1y = Column(Float)
-    o1z = Column(Float)
-    o2x = Column(Float)
-    o2y = Column(Float)
-    o2z = Column(Float)
-    
-    def __init__(self, name, pos):
-        self.name = name
-        self.cx = pos[0][0]
-        self.cy = pos[0][1]
-        self.cz = pos[0][2]
-        self.o1x = pos[1][0]
-        self.o1y = pos[1][1]
-        self.o1z = pos[1][2]
-        self.o2x = pos[2][0]
-        self.o2y = pos[2][1]
-        self.o2z = pos[2][2]
-
-
-class Data_Storage(object):
-    """Container for each pharmacophore. Contains all properties calculated for each pharma"""
-
-    def __init__(self, db_name):
-        self.engine = create_engine('sqlite:///%s.db'%(db_name))
-        Base.metadata.create_all(self.engine)
-        Session = sessionmaker(bind=self.engine)
-        self.session = Session()
-
-    def store(self, sql_pharma):
-        self.session.add(sql_pharma)
-
-    def flush(self):
-        self.session.flush()
-        self.session.commit()
-
-    def get_active_site(self, name):
-        return self.session.query(SQL_ActiveSite).filter(SQL_ActiveSite.name == name).first()
-
-class MPIPharmacophore(Pharmacophore, MPITools):
-    """Each rank has it's own set of active sites, these need to be tracked for 
-    pairings across nodes, which will either happen at each new pairing iteration,
-    or once the set of all binding sites on a node have been reduced fully."""
-
-    def generate_node_list(self):
-        return_list = []
-        for name in self._active_sites.keys():
-            return_list.append((name, MPIrank))
-        return return_list
-
-    def data_distribution(self, pairing_names, node_list):
-        """Organize the data distribution for this loop"""
-        chunks = []
-        # format (from_node, active_site_name, to_node)
-        # for some reason, the function 'chunks' produces duplicate
-        # pairing names, which are then distributed over different nodes
-        # this creates a duplication problem, as well as the difficulty that
-        # _active sites are deleted from the node after they are sent across
-        # hence the dictionary to remove any redundancy.
-        node_transmissions = {}
-        keep = {}
-        sz = int(math.ceil(float(len(list(pairing_names)))/ float(MPIsize)))
-        if sz == 0:
-            sz = 1
-        # optimize where to send each chunks.?
-        dupes = {}
-        for nt, i in enumerate(self.chunks(pairing_names, sz)):
-            chunks.append(i)
-            for n1, n2 in i:
-                if isinstance(n1, tuple):
-                    name1 = n1[0]
-                else:
-                    name1 = n1
-                if isinstance(n2, tuple):
-                    name2 = n2[0]
-                else:
-                    name2 = n2
-                if name1 is not None:
-                    dupes.setdefault(name1, 0)
-                    dupes[name1] += 1
-                    nf = [i[1] for i in node_list if i[0] == name1][0]
-                    if nf != nt:
-                        node_transmissions[name1] = (nf, name1, nt)
-                    else:
-                        keep[name1] = (nf, name1, nt)
-                if name2 is not None:
-                    dupes.setdefault(name2, 0)
-                    dupes[name2] += 1
-                    nf = [i[1] for i in node_list if i[0] == name2][0]
-                    if nf != nt:
-                        node_transmissions[name2] = (nf, name2, nt)
-                    else:
-                        keep[name2] = (nf, name2, nt)
-        # shitty hack for making the last node do nothing
-        for i in range(MPIsize-len(chunks)):
-            chunks.append([(None,None)])
-        return chunks, node_transmissions.values() 
-        # need to tell the nodes where to send and recieve their
-        # active sites.
-
-    def assign_unique_ids(self, node_list):
-        return {name:((i+1)*(p+1)) for i, (name, p) in enumerate(node_list)} 
-
-    def rank_zero_stuff(self, tree, pharma_sites, node_list):
-        if node_list:
-            # the list is sorted so that the results of a parallel run will coincide with that of 
-            # a serial run using the same random seed.
-            node_list = [j for i in node_list for j in i]
-            psort = sorted(pharma_sites.keys())
-            uuids = self.assign_unique_ids(node_list)
-            pairings = tree.branchify(psort)
-            pairing_names, pairing_count = self.gen_pairing_names(pairings, psort)
-        return pairing_names, pairing_count, uuids, node_list
-
-    def local_tree(self, tree):
-        """This is just the serial version of the tree"""
-        done = False
-        t1 = time()
-        tree = Tree()
-        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
-        node_list = sorted(pharma_sites.keys())
-        pairings = tree.branchify(node_list) # initial pairing up of active sites
-        pairing_names, pairing_count = self.gen_pairing_names(pairings, node_list)
-        pass_count = 0  # count the number of times the loop joins all bad pairs of active sites
-        while not done:
-            # loop over pairings, each successive pairing should narrow down the active sites
-            no_pairs, pharma_sites = self.combine_pairs(pairing_names, pharma_sites)
-            # count the number of times no pairings were made
-            if no_pairs == pairing_count:
-                pass_count += 1
-            # TESTME(pboyd): This may really slow down the routine.
-            else:
-                # re-set if some good sites were found
-                pass_count = 0
-            # TESTME(pboyd)
-            if pass_count == self.max_pass_count or pairings is None:
-                done = True
-            else:
-                node_list = sorted(pharma_sites.keys())
-                pairings = tree.branchify(node_list)
-                
-                pairing_names, pairing_count = self.gen_pairing_names(pairings, 
-                                                                      node_list)
-        t2 = time()
-        self.time = t2 - t1
-        self.node_done = True
-        return pharma_sites 
-
-    def run_pharma_tree(self):
-        """Take all active sites and join them randomly. This is a breadth
-        first reverse-tree algorithm."""
-        # rank 0 will keep a list of all the current active sites available, partition them, 
-        # and direct which nodes to pair what active sites. The other nodes will then 
-        # swap active sites, and pair. The resulting list of pairs will be sent back to
-        # rank 0 for future pairings.
-        tree = Tree()
-        t1 = time()
-        pharma_sites = {key:range(len(val)) for key, val in self._active_sites.items()}
-        pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
-        to_root = self.generate_node_list()
-        # collect list of nodes and all energies to the mother node. 
-        node_list = comm.gather(to_root, root=0)
-        # perform the pairing centrally, then centrally assign pairings to different nodes
-        # maybe a smart way is to minimize the number of mpi send/recv calls by sending
-        # pairs off to nodes which possess one or more of the sites already.
-        if MPIrank == 0:
-            pairing_names, pairing_count, uuids, node_list = self.rank_zero_stuff(tree, pharma_sites, node_list)
-            chunks, node_transmissions = self.data_distribution(pairing_names, node_list)
-
-        done = False
-        while not done:
-            # loop over pairings, each successive pairing should narrow down the active sites
-            # broadcast the pairing to the nodes.
-            if MPIrank != 0:
-                uuids, chunks, node_transmissions = None, None, None
-            # broadcast the uuids
-            uuids = comm.bcast(uuids, root=0)
-            # Some MPI stuff
-            pairings = comm.scatter(chunks, root=0)
-            node_transmissions = comm.bcast(node_transmissions, root=0)
-            self.collect_recieve(node_transmissions, uuids)
-            to_root = self.generate_node_list()
-            node_list = comm.gather(to_root, root=0)
-            # have to determine which sites are not being paired in this node, 
-            # then delete these sites before sending the list back to node 0
-            pairing_nodes = []
-            for k, l in pairings:
-                pairing_nodes.append(k)
-                pairing_nodes.append(l)
-            
-            # Do a local reduction of sites until no reductions can be done.. then
-            # send it to a global reduction
-            if not self.node_done:
-                pharma_sites = self.local_tree(tree)
-                no_pairs = 0
-            else:
-                # actual clique finding
-                pop_nodes = [ps for ps in pharma_sites.keys() if ps not in pairing_nodes] 
-                no_pairs, pharma_sites = self.combine_pairs(pairings, pharma_sites)
-                [pharma_sites.pop(ps) for ps in pop_nodes]
-            pharma_sites = self.collect_broadcast_dictionary(pharma_sites)
-            no_pairs = comm.gather(no_pairs, root=0)
-            if MPIrank == 0:
-                no_pairs = sum(no_pairs)
-                # for some reason the number of no_pairs can get larger than
-                # the number of pairings broadcast to each node...?
-                if no_pairs >= pairing_count:
-                    pass_count += 1
-                # TESTME(pboyd): This may really slow down the routine.
-                else:
-                # re-set if some good sites were found
-                    pass_count = 0
-                if pass_count == self.max_pass_count:
-                    done = True
-                else:
-                    pairing_names, pairing_count, uuids, node_list = self.rank_zero_stuff(tree, pharma_sites, node_list)
-                    chunks, node_transmissions = self.data_distribution(pairing_names, node_list)
-            # broadcast the complete list of nodes and names to the other nodes.
-            done = comm.bcast(done, root=0)
-        t2 = time()
-        self.time = t2 - t1
-        # collect all the nodes and write some fancy stuff.
-        if MPIrank == 0:
-            return pharma_sites.values(), pharma_sites.keys() 
-        return None, None
-   
-    def collect_broadcast_dictionary(self, dict):
-        """Collects all the elements of a dictionary from each node, combines
-        them in one big dictionary, then broadcasts that dictionary to all nodes
-        """
-        empty = {}
-        senddic = comm.gather(dict, root=0)
-        [empty.update(i) for i in comm.bcast(senddic, root=0)]
-        return empty
-        #if MPIrank==0:
-        #    senddic = dict 
-        #else:
-        #    senddic = None
-        #if MPIrank == 0:
-        #    for i in range(1,MPIsize):
-        #        tempdic = comm.recv(source=i, tag=i)
-        #        senddic.update(tempdic)
-        #else:
-        #    comm.send(dict, dest=0, tag=MPIrank)
-        #return comm.bcast(senddic, root=0)
-
-    def collect_recieve(self, node_transmissions, uuids):
-        """Send active sites on this node that are not in pairings, collect
-        active sites which are in pairings but not on this node."""
-        for n_from, name, n_to in node_transmissions:
-            tag_id = uuids[name]
-            if MPIrank == n_from:
-                sending = self._active_sites.pop(name)
-                comm.send({name:sending}, dest=n_to, tag=tag_id)
-            elif MPIrank == n_to:
-                site = comm.recv(source=n_from, tag=tag_id)
-                self._active_sites.update(site)
 
 def rotation_from_vectors(v1, v2, point=None):
     """Obtain rotation matrix from sets of vectors.
@@ -1391,7 +920,7 @@ def site_xyz(dic):
         f.writelines("%s %9.4f %9.4f %9.4f\n"%(key[:1], val[0], val[1], val[2]))
     f.close()
 
-def add_to_pharmacophore(mof, pharma, path):
+def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
     faps_graph = pharma.get_main_graph(mof)
     binding_sites = BindingSiteDiscovery(path)
     site_count = 0
@@ -1402,7 +931,7 @@ def add_to_pharmacophore(mof, pharma, path):
             try:
                 el = site.pop('electrostatic')
                 vdw = site.pop('vanderwaals')
-                if el + vdw < -30.:
+                if (el + vdw) >= energy_min and (el + vdw) <= energy_max:
                     coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
                     active_site = pharma.get_active_site(coords, faps_graph)
                     # set all elements to C so that the graph matching is non-discriminatory
@@ -1418,7 +947,6 @@ def add_to_pharmacophore(mof, pharma, path):
                 print "Error, could not find the binding site energies for " + \
                       "MOF %s"%(mof.name)
             site_count += 1
-
 
 def main_pharma():
     options = CommandLine().options
@@ -1447,7 +975,7 @@ def main_pharma():
             mofcount += 1
             faps_mof = Structure(name=mof)
             faps_mof.from_cif(os.path.join(path, mof+".cif"))
-            add_to_pharmacophore(faps_mof, pharma, path)
+            add_to_pharmacophore(faps_mof, pharma, path, energy_min=options.en_min, energy_max=options.en_max)
             if mofcount % 100 == 0:
                 pharma.sql_active_sites.flush()
     pharma.sql_active_sites.flush()
