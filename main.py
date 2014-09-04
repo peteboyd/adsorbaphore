@@ -99,7 +99,7 @@ class CommandLine(object):
         self.options = local_options
 
 def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
-    faps_graph = pharma.get_main_graph(mof)
+    #faps_graph = pharma.get_main_graph(mof)
     binding_sites = BindingSiteDiscovery(path)
     site_count = 0
     if binding_sites.absl_calc_exists():

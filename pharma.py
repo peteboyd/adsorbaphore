@@ -234,7 +234,7 @@ class Pharmacophore(object):
         s.from_faps(faps_obj, supercell=(3,3,3))
         return s
     
-    def get_active_site(self, binding_site, subgraph):
+    def get_active_site(self, binding_site, faps_structure):
         """Takes all atoms within a radii of the atoms in the binding site."""
         distances = distance.cdist(binding_site, subgraph._coordinates)
         sub_idx = []
@@ -327,22 +327,6 @@ class Pharmacophore(object):
 
     def get_active_site_from_sql(self, name):
         sqlas = self.sql_active_sites.get_active_site(name)
-        # convert to subgraph
-        #graph = SubGraph(name=sqlas.name)
-        #graph.elements = range(sqlas.size)
-        #graph.charges = range(sqlas.size)
-        #graph._orig_index = range(sqlas.size)
-        #graph._new_index = range(sqlas.size)
-        #graph._coordinates = np.empty((sqlas.size, 3))
-        #graph._dmatrix = np.empty((sqlas.size, sqlas.size))
-        #for atom in sqlas.atoms:
-        #    coord = np.array([atom.x, atom.y, atom.z])
-        #    graph._coordinates[atom.orig_id] = coord
-        #    graph.elements[atom.orig_id] = atom.elem
-        #    graph.charges[atom.orig_id] = atom.charge
-        #for dist in sqlas.distances:
-        #    graph._dmatrix[dist.row,dist.col] = dist.dist
-
         co2 = np.empty((3,3))
         sqlco2 = sqlas.co2[0]
         co2[0][0] = sqlco2.cx
@@ -354,10 +338,6 @@ class Pharmacophore(object):
         co2[2][0] = sqlco2.o2x
         co2[2][1] = sqlco2.o2y
         co2[2][2] = sqlco2.o2z
-        #print "Name: %s"%(name)
-        #print "pos = C (%12.5f, %12.5f, %12.5f)"%(tuple(co2[0]))
-        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(co2[1]))
-        #print "pos = O (%12.5f, %12.5f, %12.5f)"%(tuple(co2[2]))
         return co2, sqlas.vdweng, sqlas.eleng
     
     def get_active_site_graph_from_sql(self, name):
