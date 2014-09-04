@@ -4,18 +4,13 @@ import os
 import shutil
 import sys
 import pickle
-from optparse import OptionParser
 import itertools
 import networkx as nx
 from time import time
-import matplotlib.pyplot as plt
 import numpy as np
 import random
 from random import shuffle
 from scipy.spatial import distance
-import subprocess
-from math import pi
-from nets import Net
 from sub_graphs import SubGraph
 #from correspondence_graphs import CorrGraph
 sys.path.append("/home/pboyd/codes_in_development/mcqd_api/build/lib.linux-x86_64-2.7")
@@ -25,10 +20,6 @@ import _mcqd as mcqd
 from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
 #Data analysis stuff
 from post_processing import Fastmc_run, PairDistFn
-#MPI stuff
-global MPIrank, MPIsize, comm
-MPIrank, MPIsize, comm = 0, 1, None
-#from mpi_pharma import MPIPharmacophore, MPIMOFDiscovery
 ANGS2BOHR = 1.889725989
 ATOMIC_NUMBER = [
     "ZERO", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
@@ -41,91 +32,6 @@ ATOMIC_NUMBER = [
     "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
     "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
     "Ds", "Rg", "Cn", "Uut", "Uuq", "Uup", "Uuh", "Uuo"]
-class CommandLine(object):
-    """Parse command line options and communicate directives to the program."""
-
-    def __init__(self):
-        self.commands = {}
-        self.command_options()
-
-    def command_options(self):
-        usage = "%prog [options]"
-        parser = OptionParser(usage=usage)
-        parser.add_option("-N", "--num_mofs", action="store",
-                          type="int",
-                          default=8,
-                          dest="nmofs",
-                          help="Set the number of MOFs to scan binding sites "+
-                          "for, this will be on a first-come first-serve basis. "+
-                          "Default is 8 MOFs.")
-        parser.add_option("--radii", action="store",
-                          type="float",
-                          default=4.5,
-                          dest="radii",
-                          help="Set the radius around each atom in the " +
-                          "binding site [CO2] in which to collect framework "+
-                          "atoms to be included in the 'active site'. "+
-                          "Default set to 4.5 Angstroms.")
-        parser.add_option("--min_atom_cutoff", action="store",
-                          type="int",
-                          default=9,
-                          dest="mac",
-                          help="Set the minimum number of atoms " +
-                          "allowed when finding a maximum clique between "+
-                          "two active sites. Default is 9 atoms.")
-        parser.add_option("--random_seed", action="store",
-                          type="int",
-                          default=None,
-                          dest="seed",
-                          help="request the random number generation "+
-                               "required to randomly pair active sites to be "+
-                               "seeded with an integer. Default will seed based "+
-                               "on the system time.")
-        parser.add_option("--num_pass", action="store",
-                          type="int",
-                          dest="num_pass",
-                          default=9,
-                          help="Termination criteria. The program will be considered "+
-                               "'done' when no new active sites are found from "+
-                               "this many consecutive sets of random pairings of active sites. "+
-                               "The default is 9 passes.")
-        parser.add_option("--tol", action="store",
-                          type="float",
-                          default=0.4,
-                          dest="tol",
-                          help="set tolerance in angstroms for the clique "+
-                               "finding algorithm. Default is 0.4 Angstroms.")
-        parser.add_option("--path", action="store",
-                          type="string",
-                          default="/share/scratch/pboyd/binding_sites",
-                          dest="search_path",
-                          help="Set the search path for the binding site discovery "+
-                          "process. The program performs a recursive directory search, "+
-                          "so be sure to set this value to the highest possible base directory "+
-                          "where the binding sites can be located. Default is set to "+
-                          "'/share/scratch/pboyd/binding_sites/'")
-        parser.add_option("--en_max", action="store",
-                          type="float",
-                          default=0.0,
-                          dest="en_max",
-                          help="Set the maximum energy cutoff of the binding sites to select and "+
-                          "compare with. The default value is 0. "+
-                          "Only binding sites with energies below this value will be considered.")
-        parser.add_option("--en_min", action="store",
-                          type="float",
-                          default=-np.inf,
-                          dest="en_min",
-                          help="Set the minimum energy cutoff of the binding sites to select and "+
-                          "compare with. The default value is -inf. "+
-                          "Only binding sites with energies above this value will be considered.")
-
-        parser.add_option("--mpi", action="store_true",
-                          default=False,
-                          dest="MPI",
-                          help="Toggle the parallel version of the code. Default serial. "+
-                          "***DEPRECIATED*** - found to be too slow in the current implementation.")
-        (local_options, local_args) = parser.parse_args()
-        self.options = local_options
 
 class MOFDiscovery(object):
     def __init__(self, directory):
