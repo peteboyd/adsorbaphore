@@ -68,15 +68,17 @@ class SQL_ActiveSiteAtoms(Base):
     elem = Column(Text)
     charge = Column(Float)
     orig_id = Column(Integer)
+    mof_id = Column(Integer)
     name = Column(Text, ForeignKey('active_sites.name'))
 
-    def __init__(self, pos, elem, charge, id, name):
+    def __init__(self, pos, elem, charge, id, mofid, name):
         self.x = pos[0]
         self.y = pos[1]
         self.z = pos[2]
         self.elem = elem
         self.charge = charge
         self.orig_id = id
+        self.mof_id = mofid
         self.name = name
 
 class SQL_ActiveSite(Base):

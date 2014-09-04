@@ -196,6 +196,7 @@ class Pharmacophore(object):
         self.el_energy = {}
         self.vdw_energy = {}
         self._active_sites = {} # stores all subgraphs in a dictionary of lists.  The keys are the mof names
+        self._distance_matrix = {}
         self.pharma_sites = {} # key: active site name (mofname.[int]) val: range of graph size
         self._co2_sites = {}
         self._radii = radii # radii to scan for active site atoms
@@ -259,33 +260,35 @@ class Pharmacophore(object):
         #s.from_faps(faps_obj, supercell=(3,3,3))
         return s
     
-    def get_active_site(self, binding_site, faps_structure):
+    def get_active_site(self, binding_site, mof_coordinates):
         """Takes all atoms within a radii of the atoms in the binding site."""
-        distances = distance.cdist(binding_site, )
+        distances = distance.cdist(binding_site, mof_coordinates)
         sub_idx = []
+        coords = []
         for (x, y), val in np.ndenumerate(distances):
-            if val < self.radii:
+            if val <= self.radii:
                 sub_idx.append(y)
+                coords.append(mof_coordinates[y])
         sub_idx = list(set(sub_idx))
-        site = subgraph % sub_idx
-        site.shift_by_vector(binding_site[0])
-        return site 
-    def store_active_site(self, activesite, name='Default', el_energy=0., vdw_energy=0.):
+        return sub_idx, coords
+
+    def store_active_site(self, activesite, dmatrix, name='Default', el_energy=0., vdw_energy=0.):
+        """(ind, x, y, z, element, [mofind], charge)"""
         self.site_count += 1
         #self.el_energy[name] = el_energy
         #self.vdw_energy[name] = vdw_energy
         #self._active_sites[name] = range(len(activesite)) # activesite
+        self._active_sites[name] = activesite
+        self._distance_matrix[name] = dmatrix
         self.pharma_sites[name] = range(len(activesite))
 
         s = SQL_ActiveSite(name, len(activesite), vdw_energy, el_energy)
         self.sql_active_sites.store(s)
-        for id, element in enumerate(activesite.elements):
-            charge = activesite.charges[id]
-            pos = activesite._coordinates[id]
-            s = SQL_ActiveSiteAtoms(pos, element, charge, id, name)
+        for id,(i,element, x, y, z, element, mofind, charge) in enumerate(activesite.elements):
+            s = SQL_ActiveSiteAtoms((x, y, z), element, charge, id, mofind, name)
             self.sql_active_sites.store(s)
 
-        for (x, y), dist in np.ndenumerate(activesite._dmatrix):
+        for (x, y), dist in np.ndenumerate(dmatrix):
             s = SQL_Distances(x, y, dist, name)
             self.sql_active_sites.store(s)
     
@@ -299,17 +302,24 @@ class Pharmacophore(object):
         s = SQL_ActiveSiteCO2(name, pos)
         self.sql_active_sites.store(s)
 
-    def get_clique(self, g1, g2):
+    def get_clique(self, asi, nodesi, disti, asj, nodesj, distj):
         """Returns the atoms in g1 which constitute a maximal clique
         with respect to g2 and a given tolerance.
 
         """
-        nodes = mcqd.correspondence(g1.elements, g2.elements)
+        g1_elem = [asi[i][3] for i in nodesi]
+        g2_elem = [asj[i][3] for i in nodesj]
+        nodes = mcqd.correspondence(g1_elem, g2_elem)
         if not nodes:
             return [], []
+
+        g1_dist = np.delete(disti, nodesi, axis=1)
+        g1_dist = np.delete(g1_dist, nodesi, axis=0)
+        g2_dist = np.delete(distj, nodesj, axis=1)
+        g2_dist = np.delete(g2_dist, nodesj, axis=0)
         adj_matrix = mcqd.correspondence_edges(nodes,
-                                               g1.distances,
-                                               g2.distances,
+                                               g1_dist, 
+                                               g2_dist,
                                                self.tol)
         size = len(nodes)
         clique = mcqd.maxclique(adj_matrix, size)
@@ -366,23 +376,23 @@ class Pharmacophore(object):
         return co2, sqlas.vdweng, sqlas.eleng
     
     def get_active_site_graph_from_sql(self, name):
+        """(ind, x, y, z, element, [mofind], charge)"""
         sqlas = self.sql_active_sites.get_active_site(name)
         # convert to subgraph
-        graph = SubGraph(name=sqlas.name)
-        graph.elements = range(sqlas.size)
-        graph.charges = range(sqlas.size)
-        graph._orig_index = range(sqlas.size)
-        graph._new_index = range(sqlas.size)
-        graph._coordinates = np.empty((sqlas.size, 3))
-        graph._dmatrix = np.empty((sqlas.size, sqlas.size))
+        #graph = SubGraph(name=sqlas.name)
+        #graph.elements = range(sqlas.size)
+        #graph.charges = range(sqlas.size)
+        #graph._orig_index = range(sqlas.size)
+        #graph._new_index = range(sqlas.size)
+        #graph._coordinates = np.empty((sqlas.size, 3))
+        graph = []
+        dmatrix = np.empty((sqlas.size, sqlas.size))
         for atom in sqlas.atoms:
-            coord = np.array([atom.x, atom.y, atom.z])
-            graph._coordinates[atom.orig_id] = coord
-            graph.elements[atom.orig_id] = atom.elem
-            graph.charges[atom.orig_id] = atom.charge
+            site = (atom.id, atom.x, atom.y, atom.z, atom.elem, atom.mof_id, atom.charge)
+            graph.append(site)
         for dist in sqlas.distances:
-            graph._dmatrix[dist.row,dist.col] = dist.dist
-        return graph
+            dmatrix[dist.row,dist.col] = dist.dist
+        return sorted(graph), dmatrix
 
     def combine_pairs(self, pairings, sites):
         """Combining pairs of active sites"""
@@ -397,18 +407,21 @@ class Pharmacophore(object):
                 #asj, qq, qq, qq = self.get_active_site_from_sql(namej)
                 try:
                     asi = self._active_sites[namei]
+                    disti = self._distance_matrix[namei]
                 except KeyError:
-                    asi = self.get_active_site_graph_from_sql(namei)
+                    asi, disti = self.get_active_site_graph_from_sql(namei)
                     self._active_sites[namei] = asi
+                    self._distance_matrix[namei] = disti
                 try:
                     asj = self._active_sites[namej]
+                    distj = self._distance_matrix[namej]
                 except KeyError:
-                    asj = self.get_active_site_graph_from_sql(namej)
+                    asj, distj = self.get_active_site_graph_from_sql(namej)
                     self._active_sites[namej] = asj
+                    self._distance_matrix[namej] = distj
 
                 nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
-                g1, g2 = (asi % nodesi), (asj % nodesj)
-                p,q = self.get_clique(g1, g2)
+                p,q = self.get_clique(asi, nodesi, disti, asj, nodesj, distj)
                 # check if the clique is greater than the number of
                 # atoms according to min_cutoff
                 if len(p) >= self.min_atom_cutoff:
