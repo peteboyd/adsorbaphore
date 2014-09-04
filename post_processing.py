@@ -2,6 +2,9 @@ import numpy as np
 from config_fap import Options
 from StringIO import StringIO
 from faps import Structure, Atom, Cell, mk_gcmc_control, Guest
+import subprocess
+from math import pi
+import os
 
 class Fastmc_run(object):
     """Compute a single point energy from a FASTMC job"""
