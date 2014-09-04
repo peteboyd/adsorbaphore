@@ -5,7 +5,7 @@ import shutil
 import sys
 import pickle
 import itertools
-import networkx as nx
+import operator
 from time import time
 import numpy as np
 import random
@@ -225,18 +225,43 @@ class Pharmacophore(object):
     def radii(self, val):
         self._radii = val
 
+    def compute_supercell(self, mof, supercell):
+        """Returns a list of original indices from the mof as well as
+        coordinates of the supercell in a numpy array.
+
+        """
+        cell = mof.cell.cell
+        inv_cell = np.linalg.inv(cell.T)
+        multiplier = reduce(operator.mul, supercell, 1)
+        size = len(mof.atoms)
+        original_indices = np.empty(size*multiplier, dtype=np.int)
+        coordinates = np.empty((size*multiplier, 3), dtype=np.float)
+        
+        # shift by the median supercell - this is so that the binding sites
+        # are covered on all sides
+        box_shift = np.rint(np.median(np.array([(0,0,0), supercell]), axis=0))
+        super_box = list(itertools.product(*[itertools.product(range(j)) 
+                           for j in supercell]))
+
+        for id, atom in enumerate(mof.atoms):
+            for mult, box in enumerate(super_box):
+                fpos = atom.ifpos(inv_cell) + np.array(box, dtype=np.float) - box_shift
+                original_indices[id + mult*size] = id
+                coordinates[id + mult*size] = np.dot(fpos, cell)
+        return original_indices, coordinates
+
     def get_main_graph(self, faps_obj):
         """Takes a structure object and converts to a sub_graph using
         routines borrowed from net_finder."""
         self.lattices[faps_obj.name] = faps_obj.cell.cell
-        s = SubGraph(name=faps_obj.name)
+        #s = SubGraph(name=faps_obj.name)
         # in the future, determine the size of the supercell which would fit the radii property
-        s.from_faps(faps_obj, supercell=(3,3,3))
+        #s.from_faps(faps_obj, supercell=(3,3,3))
         return s
     
     def get_active_site(self, binding_site, faps_structure):
         """Takes all atoms within a radii of the atoms in the binding site."""
-        distances = distance.cdist(binding_site, subgraph._coordinates)
+        distances = distance.cdist(binding_site, )
         sub_idx = []
         for (x, y), val in np.ndenumerate(distances):
             if val < self.radii:
