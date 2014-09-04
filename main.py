@@ -4,6 +4,7 @@ from optparse import OptionParser
 from faps import Structure
 from config_fap import Options
 import numpy as np
+from scipy.spatial import distance
 from mpi_pharma import MPIPharmacophore, MPIMOFDiscovery
 from time import time
 import os
@@ -98,12 +99,24 @@ class CommandLine(object):
         (local_options, local_args) = parser.parse_args()
         self.options = local_options
 
+def convert_to_active_site(mof, indices, original_indices, coords):
+    """(ind, x, y, z, element, [mofind], charge)"""
+    actsit = []
+    for j, id in enumerate(indices):
+        mof_id = original_indices[id]
+        x, y, z = coords[j][:]
+        atom = mof.atoms[mof_id]
+        actsit.append((j, x, y, z, atom.type, mof_id, atom.charge))
+    return actsit, distance.cdist((coords, coords))
+
 def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
     #faps_graph = pharma.get_main_graph(mof)
     binding_sites = BindingSiteDiscovery(path)
     site_count = 0
     # compute supercell needed to support the radius in the unit cell
-    supercell = mof.cell.minimum_supercell(options.radii)
+    supercell = mof.cell.minimum_supercell(options.radii*2)
+    supercell = tuple([i if i >= 3 else 3 for i in supercell])
+
     original_indices, mof_coordinates = pharma.compute_supercell(mof, supercell)
     if binding_sites.absl_calc_exists():
         binding_sites.co2_xyz_parser()
@@ -114,10 +127,11 @@ def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
                 vdw = site.pop('vanderwaals')
                 if (el + vdw) >= energy_min and (el + vdw) <= energy_max:
                     coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
-                    active_site = pharma.get_active_site(coords, mof_coordinates)
-                    # set all elements to C so that the graph matching is non-discriminatory
-                    #active_site.set_elem_to_C()
-                    pharma.store_active_site(active_site, 
+                    indices, acoords = pharma.get_active_site(coords, mof_coordinates)
+                    # shift by C in CO2
+                    acoords -= coords[0]
+                    active_site, dmatrix = convert_to_active_site(mof, indices, original_indices, acoords)
+                    pharma.store_active_site(active_site, dmatrix 
                                              name="%s.%i"%(mof.name, site_count),
                                              el_energy=el,
                                              vdw_energy=vdw)
