@@ -100,16 +100,16 @@ class CommandLine(object):
         self.options = local_options
 
 def convert_to_active_site(mof, indices, original_indices, coords):
-    """(ind, x, y, z, element, [mofind], charge)"""
+    """(ind, x, y, z, element, mof_atom_id, charge)"""
     actsit = []
     for j, id in enumerate(indices):
         mof_id = original_indices[id]
         x, y, z = coords[j][:]
         atom = mof.atoms[mof_id]
-        actsit.append((j, x, y, z, atom.type, mof_id, atom.charge))
-    return actsit, distance.cdist((coords, coords))
+        actsit.append((j, x, y, z, atom.type, int(mof_id), atom.charge))
+    return actsit, distance.cdist(coords, coords)
 
-def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
+def add_to_pharmacophore(mof, pharma, path, options, energy_min, energy_max):
     #faps_graph = pharma.get_main_graph(mof)
     binding_sites = BindingSiteDiscovery(path)
     site_count = 0
@@ -131,8 +131,9 @@ def add_to_pharmacophore(mof, pharma, path, energy_min, energy_max):
                     # shift by C in CO2
                     acoords -= coords[0]
                     active_site, dmatrix = convert_to_active_site(mof, indices, original_indices, acoords)
-                    pharma.store_active_site(active_site, dmatrix 
+                    pharma.store_active_site(active_site, dmatrix, 
                                              name="%s.%i"%(mof.name, site_count),
+                                             mof_path=os.path.join(path, mof.name+'.cif'),
                                              el_energy=el,
                                              vdw_energy=vdw)
                     # shift the co2 pos so the carbon is at the origin
@@ -171,14 +172,14 @@ def main_pharma():
             mofcount += 1
             faps_mof = Structure(name=mof)
             faps_mof.from_cif(os.path.join(path, mof+".cif"))
-            add_to_pharmacophore(faps_mof, pharma, path, energy_min=options.en_min, energy_max=options.en_max)
+            add_to_pharmacophore(faps_mof, pharma, path, options, energy_min=options.en_min, energy_max=options.en_max)
             if mofcount % 100 == 0:
                 pharma.sql_active_sites.flush()
     pharma.sql_active_sites.flush()
     t2 = time()
     #if rank==0:
     #    print "number of binding sites = %i"%(pharma.site_count)
-    final_nodes, final_names = pharma.run_pharma_tree()
+    adsorbophores = pharma.run_pharma_tree()
     t3 = time()
     if options.MPI:
         total_site_count = comm.gather(pharma.site_count, root=0)
@@ -189,9 +190,10 @@ def main_pharma():
     if MPIrank == 0:
         # write the pickle stuff
         total_site_count = sum(total_site_count)
-        pharma.write_final_files(final_names, final_nodes, total_site_count)
+        pharma.store_adsorbophores(adsorbophores)
+        #pharma.write_final_files(*adsorbophores.items(), total_site_count)
         print "Finished. Scanned %i binding sites"%(total_site_count)
-        print "Reduced to %i active sites"%(len(final_nodes))
+        print "Reduced to %i active sites"%(len(adsorbophores.keys()))
         #print "   time for initialization = %5.3f seconds"%(t2-t1)
         print "time for pharma discovery = %5.3f seconds"%(pharma.time)
         #print "                Total time = %5.3f seconds"%(t3-t1)

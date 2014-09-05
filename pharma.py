@@ -18,6 +18,7 @@ import _mcqd as mcqd
 
 #SQL stuff
 from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
+from sql_backend import SQL_Adsorbophore, SQL_AdsorbophoreSite, SQL_AdsorbophoreSiteIndices
 #Data analysis stuff
 from post_processing import Fastmc_run, PairDistFn
 ANGS2BOHR = 1.889725989
@@ -217,7 +218,8 @@ class Pharmacophore(object):
             self.seed = random_seed
         # set the random seed
         random.seed(self.seed)
-        self.sql_active_sites = Data_Storage("active_sites") 
+        filebasename='%s_r.%3.2f'%('active_sites',self.radii)
+        self.sql_active_sites = Data_Storage(filebasename) 
 
     @property
     def radii(self):
@@ -240,13 +242,12 @@ class Pharmacophore(object):
         
         # shift by the median supercell - this is so that the binding sites
         # are covered on all sides
-        box_shift = np.rint(np.median(np.array([(0,0,0), supercell]), axis=0))
+        box_shift = np.rint(np.median(np.array([(0,0,0), [k-1 for k in supercell]]), axis=0))
         super_box = list(itertools.product(*[itertools.product(range(j)) 
                            for j in supercell]))
-
         for id, atom in enumerate(mof.atoms):
             for mult, box in enumerate(super_box):
-                fpos = atom.ifpos(inv_cell) + np.array(box, dtype=np.float) - box_shift
+                fpos = atom.ifpos(inv_cell) + np.array([b[0] for b in box], dtype=np.float) - box_shift
                 original_indices[id + mult*size] = id
                 coordinates[id + mult*size] = np.dot(fpos, cell)
         return original_indices, coordinates
@@ -272,25 +273,25 @@ class Pharmacophore(object):
         sub_idx = list(set(sub_idx))
         return sub_idx, coords
 
-    def store_active_site(self, activesite, dmatrix, name='Default', el_energy=0., vdw_energy=0.):
+    def store_active_site(self, activesite, dmatrix, name='Default', mof_path="./", el_energy=0., vdw_energy=0.):
         """(ind, x, y, z, element, [mofind], charge)"""
         self.site_count += 1
         #self.el_energy[name] = el_energy
         #self.vdw_energy[name] = vdw_energy
         #self._active_sites[name] = range(len(activesite)) # activesite
         self._active_sites[name] = activesite
-        self._distance_matrix[name] = dmatrix
         self.pharma_sites[name] = range(len(activesite))
+        self._distance_matrix[name] = dmatrix
 
-        s = SQL_ActiveSite(name, len(activesite), vdw_energy, el_energy)
+        s = SQL_ActiveSite(name, len(activesite), mof_path, vdw_energy, el_energy)
         self.sql_active_sites.store(s)
-        for id,(i,element, x, y, z, element, mofind, charge) in enumerate(activesite.elements):
-            s = SQL_ActiveSiteAtoms((x, y, z), element, charge, id, mofind, name)
+        for (i, x, y, z, element, mofind, charge) in (activesite):
+            s = SQL_ActiveSiteAtoms((x, y, z), element, charge, i, mofind, name)
             self.sql_active_sites.store(s)
 
-        for (x, y), dist in np.ndenumerate(dmatrix):
-            s = SQL_Distances(x, y, dist, name)
-            self.sql_active_sites.store(s)
+        #for (x, y), dist in np.ndenumerate(dmatrix):
+        #    s = SQL_Distances(x, y, dist, name)
+        #    self.sql_active_sites.store(s)
     
     def store_co2_pos(self, pos, name='Default'):
         #self._co2_sites[name] = pos
@@ -305,10 +306,10 @@ class Pharmacophore(object):
     def get_clique(self, asi, nodesi, disti, asj, nodesj, distj):
         """Returns the atoms in g1 which constitute a maximal clique
         with respect to g2 and a given tolerance.
-
+        activesite = (ind, x, y, z, element, [mofind], charge)
         """
-        g1_elem = [asi[i][3] for i in nodesi]
-        g2_elem = [asj[i][3] for i in nodesj]
+        g1_elem = [asi[i][4] for i in nodesi]
+        g2_elem = [asj[i][4] for i in nodesj]
         nodes = mcqd.correspondence(g1_elem, g2_elem)
         if not nodes:
             return [], []
@@ -419,7 +420,6 @@ class Pharmacophore(object):
                     asj, distj = self.get_active_site_graph_from_sql(namej)
                     self._active_sites[namej] = asj
                     self._distance_matrix[namej] = distj
-
                 nodesi, nodesj = self.get_rep_nodes(i, sites), self.get_rep_nodes(j, sites)
                 p,q = self.get_clique(asi, nodesi, disti, asj, nodesj, distj)
                 # check if the clique is greater than the number of
@@ -434,7 +434,7 @@ class Pharmacophore(object):
                     # note - the new node will have site [namei] as the representative
                     # so we delete site [namej] for memory purposes
                     del self._active_sites[namej]
-
+                    del self._distance_matrix[namej]
                 # append to the bad_pair dictionary otherwise
                 else:
                     no_pairs += 1
@@ -532,7 +532,7 @@ class Pharmacophore(object):
 
         t2 = time()
         self.time = t2 - t1
-        return pharma_sites.values(), pharma_sites.keys()
+        return pharma_sites
         #return self._active_sites.values(), self._active_sites.keys() 
 
     def obtain_error(self, name, sites, debug_ind=0):
@@ -731,6 +731,36 @@ class Pharmacophore(object):
             str += "\n"
         return str
 
+    def store_adsorbophores(self, adsorbophores):
+        """Store the raw form of the adsorbophores - which active_sites are contained,
+        which indices of the active sites are included.
+        
+        [rank] --> pharma_sites --> indices
+        """
+        filebasename='%s_N.%i_r.%3.2f_ac.%i_ma.%i_rs.%i_t.%3.2f'%('adsorbophores',
+                                                                  self.site_count,
+                                                                  self.radii,
+                                                                  self.min_atom_cutoff,
+                                                                  self.max_pass_count,
+                                                                  self.seed,
+                                                                  self.tol)
+        data_storage = Data_Storage(filebasename)
+        names = [i for i in adsorbophores.keys() if isinstance(i, tuple)]
+        names = sorted(names, key=len)
+        # rank by size of tuple.
+        names.reverse()
+        for rank, name in enumerate(names):
+            vals = adsorbophores[name]
+            ads = SQL_Adsorbophore(rank)
+            data_storage.store(ads)
+            for id, nn in enumerate(name):
+                peanut = SQL_AdsorbophoreSite(rank, nn)
+                data_storage.store(peanut)
+                for site_index in [jj[id] for jj in vals]:
+                    butter = SQL_AdsorbophoreSiteIndices(nn, site_index)
+                    data_storage.store(butter)
+            data_storage.flush()
+
 
     def write_final_files(self, names, pharma_graphs, site_count):
         #pickle_dic = {}
@@ -781,6 +811,7 @@ class Pharmacophore(object):
             # only store the co2 distributions from the more important binding sites, currently set to
             # 0.1 % of the number of original binding sites
             error = self.obtain_error(name, pharma, debug_ind=id)
+            error = 0.
             sql.set_error(error)
             if isinstance(name, tuple) and pharma_length >= int(site_count*0.001):
                 # store the nets, this is depreciated..
