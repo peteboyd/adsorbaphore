@@ -71,13 +71,13 @@ class SQL_ActiveSiteAtoms(Base):
     mof_id = Column(Integer)
     name = Column(Text, ForeignKey('active_sites.name'))
 
-    def __init__(self, pos, elem, charge, id, mofid, name):
+    def __init__(self, pos, elem, charge, oid, mofid, name):
         self.x = pos[0]
         self.y = pos[1]
         self.z = pos[2]
         self.elem = elem
         self.charge = charge
-        self.orig_id = id
+        self.orig_id = oid
         self.mof_id = mofid
         self.name = name
 
@@ -87,16 +87,18 @@ class SQL_ActiveSite(Base):
     size = Column(Integer)
     vdweng = Column(Float)
     eleng = Column(Float)
+    mofpath = Column(Text)
     name = Column(Text)
     atoms = relationship('SQL_ActiveSiteAtoms',backref='active_sites')
     distances = relationship('SQL_Distances',backref='active_sites')
     co2 = relationship('SQL_ActiveSiteCO2', backref='carbon_dioxide')
 
-    def __init__(self, name, size, vdweng, eleng):
+    def __init__(self, name, size, mofpath, vdweng, eleng):
         self.name = name
         self.size = size
         self.vdweng = vdweng
         self.eleng = eleng
+        self.mofpath = mofpath
 
 class SQL_Distances(Base):
     __tablename__ = "distance_matrix"
@@ -138,6 +140,31 @@ class SQL_ActiveSiteCO2(Base):
         self.o2y = pos[2][1]
         self.o2z = pos[2][2]
 
+class SQL_Adsorbophore(Base):
+    __tablename__ = "adsorbophore"
+    rank = Column(Integer, primary_key=True)
+    active_sites = relationship('SQL_AdsorbophoreSite',backref='adsorbophore')
+    def __init__(self, rank):
+        self.rank = rank
+
+class SQL_AdsorbophoreSite(Base):
+    __tablename__ = "adsorbophore_site"
+    id = Column(Integer, primary_key=True)
+    rank = Column(Integer, ForeignKey('adsorbophore.rank'))
+    name = Column(Text)
+    indices = relationship('SQL_AdsorbophoreSiteIndices',backref='adsorbophore_site')
+    def __init__(self, rank, name):
+        self.rank = rank
+        self.name = name
+
+class SQL_AdsorbophoreSiteIndices(Base):
+    __tablename__ = "adsorbophore_site_indices"
+    id = Column(Integer, primary_key=True)
+    index = Column(Integer)
+    name = Column(Text, ForeignKey('adsorbophore_site.name'))
+    def __init__(self, name, index):
+        self.index = index
+        self.name = name
 
 class Data_Storage(object):
     """Container for each pharmacophore. Contains all properties calculated for each pharma"""
