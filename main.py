@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 from pharma import Pharmacophore, MOFDiscovery, BindingSiteDiscovery
-from optparse import OptionParser
+from optparse import OptionParser, OptionGroup
 from faps import Structure
 from config_fap import Options
 import numpy as np
+from post_processing import PostRun
 from scipy.spatial import distance
 from mpi_pharma import MPIPharmacophore, MPIMOFDiscovery
 from time import time
@@ -23,6 +24,8 @@ class CommandLine(object):
     def command_options(self):
         usage = "%prog [options]"
         parser = OptionParser(usage=usage)
+        postgroup = OptionGroup(parser, "Post Processing",
+                                "Commands used for after the main program is run.")
         parser.add_option("-N", "--num_mofs", action="store",
                           type="int",
                           default=8,
@@ -96,6 +99,41 @@ class CommandLine(object):
                           dest="MPI",
                           help="Toggle the parallel version of the code. Default serial. "+
                           "***DEPRECIATED*** - found to be too slow in the current implementation.")
+
+        postgroup.add_option("--rank", action="store",
+                          type="int",
+                          dest="rank",
+                          default=0,
+                          help="Request the adsorbophore of specified rank. Ranking is based on the number of "+
+                          "active sites the adsorbophore encompasses. This turns OFF the adsorbophore discovery, "+
+                          "and switches ON the post processing. Default is '0' which is 'off'. Top ranked starts at 1.")
+        postgroup.add_option("--active_sites_file", action="store",
+                          type="string",
+                          default="",
+                          dest="active_sites_file",
+                          help="If post processing is turned ON (by setting --rank != 0) this will tell the program "+
+                          "to load the sql file (typically ending in .db) for the active sites. "+
+                          "default is an empty string. If this is kept empty, the program will search for a file "+
+                          "starting with 'active_site' and ending with '.db' in the current working directory. Exits "+
+                          "if not found.")
+        postgroup.add_option("--adsorbophore_file", action="store",
+                          type="string",
+                          default="",
+                          dest="adsorbophore_file",
+                          help="If post processing is turned ON (by setting --rank != 0) this will tell the program "+
+                          "to load the sql file (typically ending in .db) for the adsorbophores. "+
+                          "default is an empty string. If this is kept empty, the program will search for a file "+
+                          "starting with 'adsorbophore' and ending with '.db' in the current working directory. Exits "+
+                          "if not found.")
+        postgroup.add_option("--prob_grid_points", action="store",
+                          type="int",
+                          default=70,
+                          dest="num_gridpoints",
+                          help="If post processing is turned ON (by setting --rank != 0) this will tell the program "+
+                          "to write the probability files with this number of gridpoints in the "+
+                          "x, y, and z dimensions. The size of the box is roughly 2*RADII. "+
+                          "Default is 70 (ie. a box with 70x70x70 gridpoints).")
+        parser.add_option_group(postgroup)
         (local_options, local_args) = parser.parse_args()
         self.options = local_options
 
@@ -145,8 +183,7 @@ def add_to_pharmacophore(mof, pharma, path, options, energy_min, energy_max):
             site_count += 1
 
 
-def main_pharma():
-    options = CommandLine().options
+def main_pharma(options):
     t1 = time()
     if options.MPI:
         pharma = MPIPharmacophore(
@@ -198,5 +235,15 @@ def main_pharma():
         print "time for pharma discovery = %5.3f seconds"%(pharma.time)
         #print "                Total time = %5.3f seconds"%(t3-t1)
 
+def post_run(options):
+    post = PostRun(options)
+    post.obtain_co2_distribution(options.rank)
+    post.print_stats(options.rank)
+
 if __name__ == "__main__":
-    main_pharma()
+    options = CommandLine().options
+    options.working_dir = os.getcwd()
+    if options.rank:
+        post_run(options)
+    else:
+        main_pharma(options)

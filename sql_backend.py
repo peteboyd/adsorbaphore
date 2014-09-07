@@ -161,9 +161,11 @@ class SQL_AdsorbophoreSiteIndices(Base):
     __tablename__ = "adsorbophore_site_indices"
     id = Column(Integer, primary_key=True)
     index = Column(Integer)
+    order = Column(Integer)
     name = Column(Text, ForeignKey('adsorbophore_site.name'))
-    def __init__(self, name, index):
+    def __init__(self, name, order, index):
         self.index = index
+        self.order = order
         self.name = name
 
 class Data_Storage(object):
@@ -184,3 +186,9 @@ class Data_Storage(object):
 
     def get_active_site(self, name):
         return self.session.query(SQL_ActiveSite).filter(SQL_ActiveSite.name == name).first()
+
+    def get_adsorbophore(self, rank):
+        return self.session.query(SQL_Adsorbophore).filter(SQL_Adsorbophore.rank == rank).first()
+
+    def ads_count(self):
+        return self.session.query(SQL_Adsorbophore).count()

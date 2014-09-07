@@ -7,6 +7,19 @@ from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSite
 from sql_backend import SQL_Adsorbophore, SQL_AdsorbophoreSite, SQL_AdsorbophoreSiteIndices
 from math import pi
 import os
+import sys
+ANGS2BOHR = 1.889725989
+ATOMIC_NUMBER = [
+    "ZERO", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
+    "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn",
+    "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb",
+    "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
+    "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta",
+    "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At",
+    "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
+    "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
+    "Ds", "Rg", "Cn", "Uut", "Uuq", "Uup", "Uuh", "Uuo"]
 
 class Fastmc_run(object):
     """Compute a single point energy from a FASTMC job"""
@@ -38,12 +51,12 @@ class Fastmc_run(object):
         self.struct.guests = [guest]
         self.guest_dic = {guest.ident: [position]}
 
-    def add_fragment(self, net_obj, lattice):
+    def add_fragment(self, elems, coords, charges, lattice):
         cell = Cell()
         cell._cell = np.array(lattice)
         self.struct.cell = cell
-        for id, (elem, posi) in enumerate(zip(net_obj.elements, net_obj._coordinates)):
-            atom = Atom(at_type=elem, pos=posi, parent=self.struct, charge=net_obj.charges[id])
+        for elem, coord, charge in zip(elems, coords, charges):
+            atom = Atom(at_type=elem, pos=coord, parent=self.struct, charge=charge)
             self.struct.atoms.append(atom)
 
     def run_fastmc(self):
@@ -190,46 +203,88 @@ class PairDistFn(object):
                 for i in range(self.bins)]
         return rdf
 
-class Something(object):
-    
-    def obtain_error(self, name, sites, debug_ind=0):
-        if not isinstance(name, tuple):
-            return 0.
-        #site, qq, qq, qq = self.get_active_site_from_sql(name[0])
-        try:
-            site = self._active_sites[name[0]]
-        except KeyError:
-            site = self.get_active_site_graph_from_sql(name[0])
-        base = site % [j[0] for j in sites]
-        base.shift_by_centre_of_atoms()
-        mean_errors = []
-        for ii in range(1, len(name)):
-            atms = [q[ii] for q in sites]
-            #site, qq, qq, qq = self.get_active_site_from_sql(name[ii])
+class PostRun(object):
+   
+    def __init__(self, options):
+        self.options = options
+        self.check_for_active_sites_file()
+        self.check_for_adsorbophore_file()
+        self.adsorbophore_db = Data_Storage(self.options.adsorbophore_file[:-3])
+        self.active_sites_db = Data_Storage(self.options.active_sites_file[:-3])
+
+    def check_for_active_sites_file(self):
+        if self.options.active_sites_file:
+            if not os.path.isfile(self.options.active_sites_file):
+                print "Could not find %s, exiting."%self.options.active_sites_file
+                sys.exit()
+        else:
+            file = [i for i in os.listdir(self.options.working_dir) 
+                    if i.startswith('active_sit') and i.endswith('.db')]
             try:
-                site = self._active_sites[name[ii]]
-            except KeyError:
-                site = self.get_active_site_graph_from_sql(name[ii])
-            match = site % atms
-            T = match.centre_of_atoms.copy()
-            match.shift_by_centre_of_atoms()
-            R = rotation_from_vectors(match._coordinates[:], 
-                                      base._coordinates[:])
-            #R = rotation_from_vectors(base._coordinates[:],
-            #                          match._coordinates[:]) 
-            match.rotate(R)
-            #co2 = self._co2_sites[name[ii]]
-            #co2 -= T
-            #co2 = np.dot(R[:3,:3],co2.T).T
-            #match.debug('clique%i'%debug_ind)
-            #f = open('clique%i.xyz'%debug_ind, 'a')
-            #for at, (x, y, z) in zip(['C', 'O', 'O'], co2):
-            #    f.writelines("%s %12.5f %12.5f %12.5f\n"%(at, x, y, z))
-            #f.close()
-            #NB THIS MIGHT BE BIG.
-            #mean_errors.append(np.sqrt(np.mean((base._coordinates - match._coordinates)**2)))
-            for p, q in zip(base._coordinates, match._coordinates):
+                self.options.active_sites_file = file[0]
+            except IndexError:
+                print "Could not find an active_sites database file in %s, exiting."%(
+                        self.options.working_dir)
+                sys.exit()
+    
+    def check_for_adsorbophore_file(self):
+        if self.options.adsorbophore_file:
+            if not os.path.isfile(self.options.adsorbophore_file):
+                print "Could not find %s, exiting."%self.options.adsorbophore_file
+                sys.exit()
+        else:
+            file = [i for i in os.listdir(self.options.working_dir) 
+                    if i.startswith('adsorbopho') and i.endswith('.db')]
+            try:
+                self.options.adsorbophore_file = file[0]
+            except IndexError:
+                print "Could not find an adsorbophore database file in %s, exiting."%(
+                        self.options.working_dir)
+                sys.exit()
+
+    def adsorbophore_from_sql(self, rank):
+        count = self.adsorbophore_db.ads_count()
+        if rank > count:
+            print "Rank %i is too big, the adsorbophore database only goes up to %i"%(rank, count)
+            sys.exit()
+        ads = self.adsorbophore_db.get_adsorbophore(rank)
+        return ads
+
+    def centre_of_atoms(self, coords):
+        return np.average(coords, axis=0)
+
+    def obtain_error(self, rank, debug_ind=0):
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        # get the first adsorbophore as the representative one for the adsorbophore
+        base_ads = adsorbophore.active_sites[0]
+        # get the indices for the adsorbophore
+        indices = [i.index for i in base_ads.indices]
+        # obtain the original active site from the MOF
+        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        # get the coordinates of the relevant atoms from the active site
+        base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
+        base_coords -= self.centre_of_atoms(base_coords)
+        #base_elements = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+        mean_errors = []
+        #f = open('debug.xyz', 'w')
+        #f.writelines("%i\nbase\n"%(len(base_elements)))
+        #for atom, coord in zip(base_elements, base_coords):
+        #    f.writelines("%s %6.3f %6.3f %6.3f\n"%(atom, coord[0], coord[1], coord[2]))
+
+        for site in adsorbophore.active_sites[1:]:
+            indices = [i.index for i in site.indices]
+            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
+            #act_elements = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+            act_coords -= self.centre_of_atoms(act_coords)
+            R = rotation_from_vectors(act_coords[:], base_coords[:])
+            act_coords = np.dot(R[:3,:3], act_coords.T).T
+            #f.writelines("%i\nother\n"%(len(act_elements)))
+            #for atom, coord in zip(act_elements, act_coords):
+            #    f.writelines("%s %6.3f %6.3f %6.3f\n"%(atom, coord[0], coord[1], coord[2]))
+            for p, q in zip(base_coords, act_coords):
                 mean_errors.append((p-q)**2)
+        #f.close()
         return np.sqrt(np.mean(mean_errors))
 
     def get_grid_indices(self, coord, (nx, ny, nz)):
@@ -263,118 +318,232 @@ class Something(object):
             print "WARNING: unrecognized indices passed to grid storage routine!"
             print inds
     
-    def obtain_co2_fragment_energies(self, name, site, co2, i=0):
-        #nn = name[id]
-        #ss = [j[id] for j in sites]
-        mofname = '.'.join(name.split('.')[:-1])
-        cell = (self.lattices[mofname].T * np.array([5.,5.,5.])).T
+    def obtain_co2_fragment_energies(self, elems, coords, charges, cell, co2, i=0):
+        cell = (cell.T * np.array([5.,5.,5.])).T
         fastmc = Fastmc_run(supercell=(1,1,1))
         fastmc.add_guest(co2)
-        fastmc.add_fragment(site, cell)
+        fastmc.add_fragment(elems, coords, charges, cell)
         fastmc.run_fastmc()
         vdw, el = fastmc.obtain_energy()
         fastmc.clean(i)
         return vdw*4.184, el*4.184
 
-    def obtain_co2_distribution(self, name, sites, ngridx=70, ngridy=70, ngridz=70):
+    def obtain_total_energy_distribution(self, rank):
+        gride = np.zeros((ngridx, ngridy, ngridz))
+        gridecount = np.ones((ngridx, ngridy, ngridz))
+        _2radii = self.options.radii*2. + 2.
 
+        shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
+        nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
+        
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        # get the first adsorbophore as the representative one for the adsorbophore
+        base_ads = adsorbophore.active_sites[0]
+        # get the indices for the adsorbophore
+        indices = [i.index for i in base_ads.indices]
+        # obtain the original active site from the MOF
+        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+        # get the coordinates of the relevant atoms from the active site
+        base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
+        base_charges = np.array([base_site.atoms[j].charge for j in indices])
+        T = self.centre_of_atoms(base_coords)
+        base_coords -= T
+
+        base_eng = base_site.vdweng + base_site.eleng
+        size = 0
+        if base_eng <= self.options.en_max and base_eng >= self.options.en_min:
+            mofname = os.path.split(base_site.mofpath)[-1][:-3]
+            struct = Structure(mofname)
+            struct.from_cif(base_site.mofpath)
+            co2 = self.return_co2_array(base_site)
+            co2 -= T
+            vdw, el = self.obtain_co2_fragment_energies(base_elem, base_coords,
+                    base_charges, struct.cell.cell, co2)
+            inds = self.get_grid_indices(co2 + shift_vector, (nx,ny,nz))
+            self.increment_grid(gride, inds[0], en=vdw+el)
+            self.increment_grid(gridecount, inds[0]) 
+            size += 1
+
+        for site in adsorbophore.active_sites[1:]:
+            indices = [i.index for i in site.indices]
+            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_elem = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+            act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
+            act_charges = np.array([act_sit.atoms[j].charge for j in indices])
+            site_eng = act_sit.vdweng + act_sit.eleng
+            if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
+                mofname = os.path.split(act_sit.mofpath)[-1][:-3]
+                struct = Structure(mofname)
+                struct.from_cif(act_sit.mofpath)
+
+                T = self.centre_of_atoms(act_coords)
+                act_coords -= T 
+                R = rotation_from_vectors(act_coords[:], base_coords[:])
+
+                co2 = self.return_co2_array(act_sit)
+                co2 -= T
+                co2 = np.dot(R[:3,:3], co2.T).T
+                vdw, el = self.obtain_co2_fragment_energies(act_elem, act_coords,
+                        act_charges, struct.cell.cell, co2)
+                inds = self.get_grid_indices((co2+shift_vector), (nx, ny, nz))
+                self.increment_grid(gride, inds[0], en=vdw+el)
+                self.increment_grid(gridecount, inds[0]) 
+                size += 1
+        string_gride = self.get_cube_format(base_elem, base_coords, gride, size, gridecount, 
+                                            ngridx, ngridy, ngridz)
+        
+        ecube = open('rank%i_TOTEN.cube'%(rank), 'w')
+        ecube.writelines(string_gride)
+        ecube.close()
+
+
+    
+    def obtain_split_energy_distribution(self, rank):
+        gridevdw = np.zeros((ngridx, ngridy, ngridz))
+        grideel = np.zeros((ngridx, ngridy, ngridz))
+        gridevdwcount = np.ones((ngridx, ngridy, ngridz))
+        grideelcount = np.ones((ngridx, ngridy, ngridz))
+        _2radii = self.options.radii*2. + 2.
+
+        shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
+        nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
+        #evdw /= vdweng
+        #eel /= eleng
+        #self.increment_grid(gridevdw, inds[0], en=evdw)
+        #self.increment_grid(grideel, inds[0], en=eel)
+
+    def obtain_co2_distribution(self, rank):
+        ngridx, ngridy, ngridz = [self.options.num_gridpoints]*3
         gridc = np.zeros((ngridx, ngridy, ngridz))
         grido = np.zeros((ngridx, ngridy, ngridz))
 
-        #gridevdw = np.zeros((ngridx, ngridy, ngridz))
-        #grideel = np.zeros((ngridx, ngridy, ngridz))
-        gride = np.zeros((ngridx, ngridy, ngridz))
-        #gridevdwcount = np.ones((ngridx, ngridy, ngridz))
-        #grideelcount = np.ones((ngridx, ngridy, ngridz))
-        gridecount = np.ones((ngridx, ngridy, ngridz))
-        if not isinstance(name, tuple):
-            return None, None
-        _2radii = self.radii*2. + 2.
+        _2radii = self.options.radii*2. + 2.
         # Because the cube file puts the pharmacophore in the middle of the box,
         # we need to shift the CO2 distributions to centre at the middle of the box
         # this was originally set to the radial cutoff distance of the initial
         # pharmacophore 
         shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
-        #shift_vector = np.array([self._radii, self._radii, self._radii])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
-        co2, vdweng, eleng = self.get_active_site_from_sql(name[0])
-        try:
-            site = self._active_sites[name[0]]
-        except KeyError:
-            site = self.get_active_site_graph_from_sql(name[0])
-        #co2 = self._co2_sites[name[0]]
-        base = site % [j[0] for j in sites]
-        T = base.centre_of_atoms[:3].copy()
-        base.shift_by_centre_of_atoms()
-        inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
-        self.increment_grid(gridc, inds[0])
-        self.increment_grid(grido, inds[1:])
-        evdw, eel = self.obtain_co2_fragment_energies(name[0], base, co2-T, 0)
-        #evdw /= vdweng
-        #eel /= eleng
-        #self.increment_grid(gridevdw, inds[0], en=evdw)
-        #self.increment_grid(grideel, inds[0], en=eel)
-        self.increment_grid(gride, inds[0], en=eel+evdw)
+        
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        # get the first adsorbophore as the representative one for the adsorbophore
+        base_ads = adsorbophore.active_sites[0]
+        # get the indices for the adsorbophore
+        indices = [i.index for i in base_ads.indices]
+        # obtain the original active site from the MOF
+        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        # get the coordinates of the relevant atoms from the active site
+        base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
+        base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+        T = self.centre_of_atoms(base_coords)
+        base_coords -= T
 
-        for ii in range(1, len(name)):
-
-            atms = [q[ii] for q in sites]
-            co2, vdweng, eleng = self.get_active_site_from_sql(name[ii])
-            try:
-                site = self._active_sites[name[ii]]
-            except KeyError:
-                site = self.get_active_site_graph_from_sql(name[ii])
-            match = site % atms
-            T = match.centre_of_atoms[:3].copy()
-            match.shift_by_centre_of_atoms()
-            R = rotation_from_vectors(match._coordinates[:], 
-                                      base._coordinates[:])
-            #R = rotation_from_vectors(base._coordinates[:], 
-            #                          match._coordinates[:])
-            match.rotate(R)
-            #co2 = self._co2_sites[name[ii]].copy()
-            co2 -= T
-            co2 = np.dot(R[:3,:3], co2.T).T
-            inds = self.get_grid_indices((co2+shift_vector), (nx,ny,nz))
+        base_eng = base_site.vdweng + base_site.eleng
+        size = 0
+        if base_eng <= self.options.en_max and base_eng >= self.options.en_min:
+            co2 = self.return_co2_array(base_site)
+            inds = self.get_grid_indices(co2 - T + shift_vector, (nx,ny,nz))
             self.increment_grid(gridc, inds[0])
             self.increment_grid(grido, inds[1:])
-            evdw, eel = self.obtain_co2_fragment_energies(name[ii], match, co2, ii)
-            #evdw /= vdweng
-            #eel /= eleng
-            #self.increment_grid(gridevdw, inds[0], en=evdw)
-            #self.increment_grid(grideel, inds[0], en=eel)
-            self.increment_grid(gride, inds[0], en=eel+evdw)
-            #self.increment_grid(gridevdwcount, inds[0])
-            #self.increment_grid(grideelcount, inds[0]) 
-            self.increment_grid(gridecount, inds[0]) 
-            # bin the x, y, and z
-        string_gridc = self.get_cube_format(base, gridc, len(name), float(len(name)),
-                                                ngridx, ngridy, ngridz)
-        string_grido = self.get_cube_format(base, grido, len(name), float(len(name)), 
-                                                ngridx, ngridy, ngridz)
-        #string_gridevdw = self.get_cube_format(base, gridevdw, len(name), gridevdwcount,
-        #                                        ngridx, ngridy, ngridz)
-        #string_grideel = self.get_cube_format(base, grideel, len(name), grideelcount,
-        #                                        ngridx, ngridy, ngridz)
-        string_gride = self.get_cube_format(base, gride, len(name), gridecount,
-                                            ngridx, ngridy, ngridz)
-        return string_gridc, string_grido, string_gride #string_gridevdw, string_grideel
+            size += 1
 
-    def get_cube_format(self, clique, grid, count, avg, ngridx, ngridy, ngridz):
+        for site in adsorbophore.active_sites[1:]:
+            indices = [i.index for i in site.indices]
+            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
+
+            site_eng = act_sit.vdweng + act_sit.eleng
+
+            if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
+                T = self.centre_of_atoms(act_coords)
+                act_coords -= T 
+                R = rotation_from_vectors(act_coords[:], base_coords[:])
+
+                co2 = self.return_co2_array(act_sit)
+                co2 -= T
+                co2 = np.dot(R[:3,:3], co2.T).T
+                inds = self.get_grid_indices((co2+shift_vector), (nx, ny, nz))
+                self.increment_grid(gridc, inds[0])
+                self.increment_grid(grido, inds[1:])
+                size += 1
+
+        string_gridc = self.get_cube_format(base_elem, base_coords, gridc, size, float(size),
+                                                ngridx, ngridy, ngridz)
+        string_grido = self.get_cube_format(base_elem, base_coords, grido, size, float(size), 
+                                                ngridx, ngridy, ngridz)
+        ccube = open('rank%i_C.cube'%(rank), 'w')
+        ccube.writelines(string_gridc)
+        ccube.close()
+
+        ocube = open('rank%i_O.cube'%(rank), 'w')
+        ocube.writelines(string_grido)
+        ocube.close()
+
+
+           #atms = [q[ii] for q in sites]
+           #co2, vdweng, eleng = self.get_active_site_from_sql(name[ii])
+           #try:
+           #    site = self._active_sites[name[ii]]
+           #except KeyError:
+           #    site = self.get_active_site_graph_from_sql(name[ii])
+           #match = site % atms
+           #T = match.centre_of_atoms[:3].copy()
+           #match.shift_by_centre_of_atoms()
+           #R = rotation_from_vectors(match._coordinates[:], 
+           #                          base._coordinates[:])
+           ##R = rotation_from_vectors(base._coordinates[:], 
+           ##                          match._coordinates[:])
+           #match.rotate(R)
+           ##co2 = self._co2_sites[name[ii]].copy()
+           #co2 -= T
+           #co2 = np.dot(R[:3,:3], co2.T).T
+           #inds = self.get_grid_indices((co2+shift_vector), (nx,ny,nz))
+           #self.increment_grid(gridc, inds[0])
+           #self.increment_grid(grido, inds[1:])
+           #evdw, eel = self.obtain_co2_fragment_energies(name[ii], match, co2, ii)
+           ##evdw /= vdweng
+           ##eel /= eleng
+           ##self.increment_grid(gridevdw, inds[0], en=evdw)
+           ##self.increment_grid(grideel, inds[0], en=eel)
+           #self.increment_grid(gride, inds[0], en=eel+evdw)
+           ##self.increment_grid(gridevdwcount, inds[0])
+           ##self.increment_grid(grideelcount, inds[0]) 
+           #self.increment_grid(gridecount, inds[0]) 
+           ## bin the x, y, and z
+        #string_gridc = self.get_cube_format(base, gridc, len(name), float(len(name)),
+        #                                        ngridx, ngridy, ngridz)
+        #string_grido = self.get_cube_format(base, grido, len(name), float(len(name)), 
+        #                                        ngridx, ngridy, ngridz)
+        ##string_gridevdw = self.get_cube_format(base, gridevdw, len(name), gridevdwcount,
+        ##                                        ngridx, ngridy, ngridz)
+        ##string_grideel = self.get_cube_format(base, grideel, len(name), grideelcount,
+        ##                                        ngridx, ngridy, ngridz)
+        #string_gride = self.get_cube_format(base, gride, len(name), gridecount,
+        #                                    ngridx, ngridy, ngridz)
+        #return string_gridc, string_grido, string_gride #string_gridevdw, string_grideel
+
+    def return_co2_array(self, active_site):
+        c = active_site.co2[0]
+        return np.array([[c.cx, c.cy, c.cz],
+                         [c.o1x, c.o1y, c.o1z],
+                         [c.o2x, c.o2y, c.o2z]])
+
+    def get_cube_format(self, elem, coords, grid, count, avg, ngridx, ngridy, ngridz):
         # header
         str = "Clique containing %i binding sites\n"%count
         str += "outer loop a, middle loop b, inner loop c\n"
-        str += "%6i %11.6f %11.6f %11.6f\n"%(len(clique), 0., 0., 0.)
-        _2radii = (self._radii*2. + 2.)
+        str += "%6i %11.6f %11.6f %11.6f\n"%(len(elem), 0., 0., 0.)
+        _2radii = (self.options.radii*2. + 2.)
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, _2radii*ANGS2BOHR/float(ngridx), 0., 0.)
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., _2radii*ANGS2BOHR/float(ngridy), 0.)
         str += "%6i %11.6f %11.6f %11.6f\n"%(ngridx, 0., 0., _2radii*ANGS2BOHR/float(ngridz))
         vect = np.array([_2radii/2., _2radii/2., _2radii/2.]) 
-        for i in range(len(clique)):
-            atm = ATOMIC_NUMBER.index(clique.elements[i])
-            coords = (clique._coordinates[i] + vect)*ANGS2BOHR
-            str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., coords[0],
-                                                           coords[1], coords[2])
+        for atom, coord in zip(elem, coords):
+            atm = ATOMIC_NUMBER.index(atom)
+            shifted_coord = (coord + vect)*ANGS2BOHR
+            str += "%6i %11.6f  %10.6f  %10.6f  %10.6f\n"%(atm, 0., shifted_coord[0],
+                                                           shifted_coord[1], shifted_coord[2])
 
         grid /= avg 
         it = np.nditer(grid, flags=['multi_index'], order='C')
@@ -387,81 +556,47 @@ class Something(object):
                     break
             str += "\n"
         return str
+    
+    def print_stats(self, rank):
 
-    def write_final_files(self, names, pharma_graphs, site_count):
-        #pickle_dic = {}
-        #co2_pos_dic = {}
-        #co2_dist_dic = {}
-        filebasename='%s_N.%i_r.%3.2f_ac.%i_ma.%i_rs.%i_t.%3.2f'%("pharma",
-                                                 site_count,
-                                                 self.radii,
-                                                 self.min_atom_cutoff,
-                                                 self.max_pass_count,
-                                                 self.seed,
-                                                 self.tol)
-        #f = open(filebasename+".csv", 'w')
-        data_storage = Data_Storage(filebasename)
-        ranking = []
-        datas = {}
-        #f.writelines("length,pharma_std,el_avg,el_std,vdw_avg,vdw_std,tot_avg,tot_std,name\n") 
-        for id, (name, pharma) in enumerate(zip(names, pharma_graphs)):
-            
-            el, vdw, tot = [], [], []
-            if isinstance(name, tuple):
-                for n in name:
-                    co2, vdw_en, el_en = self.get_active_site_from_sql(n)
+        error = self.obtain_error(rank)
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        vdw, el = [],[]
+        for active_site in adsorbophore.active_sites:
+            act_site = self.active_sites_db.get_active_site(active_site.name)
+            vdw.append(act_site.vdweng)
+            el.append(act_site.eleng)
 
-                    el.append(el_en)
-                    vdw.append(vdw_en)
-                    tot.append(el_en+vdw_en)
+        vdw = np.array(vdw)
+        el = np.array(el)
+        print "DATA for rank %i"%(rank)
+        print "============================"
+        print "adsorbophore size : %i"%(len(adsorbophore.active_sites))
+        print "average VDW energy: %12.5f +/- %12.5f"%(np.mean(vdw), np.std(vdw))
+        print "average ELE energy: %12.5f +/- %12.5f"%(np.mean(el), np.std(el))
+        print "RMSD atoms        : %12.5f"%(error)
 
-                elavg = np.mean(el)
-                elstd = np.std(el)
-                vdwavg = np.mean(vdw)
-                vdwstd = np.std(vdw)
-                totavg = np.mean(tot)
-                totstd = np.std(tot)
-                pharma_length = len(name)
-            else:
-                pharma_length = 1
-                co2, vdw_en, el_en = self.get_active_site_from_sql(name)
-                
-                elavg = el_en 
-                elstd = 0. 
-                vdwavg = vdw_en 
-                vdwstd = 0. 
-                totavg = el_en + vdw_en 
-                totstd = 0.
-            sql = SQL_Pharma(str(name), vdwavg, vdwstd, elavg, elstd, pharma_length)
-            ranking.append((pharma_length, str(name)))
-            # only store the co2 distributions from the more important binding sites, currently set to
-            # 0.1 % of the number of original binding sites
-            error = self.obtain_error(name, pharma, debug_ind=id)
-            error = 0.
-            sql.set_error(error)
-            if isinstance(name, tuple) and pharma_length >= int(site_count*0.001):
-                # store the nets, this is depreciated..
-                #site.shift_by_centre_of_atoms()
-                #pickle_dic[name] = site 
-                # store the CO2 distributions
-                cdist, odist, edist = self.obtain_co2_distribution(name, pharma)
-                sql.set_probs(cdist, odist, edist)
-                #co2_dist_dic[name] = (cdist, odist)
-                # compute the energy distribution from the extracted site (function of radii)
+def rotation_from_vectors(v1, v2, point=None):
+    """Obtain rotation matrix from sets of vectors.
+    the original set is v1 and the vectors to rotate
+    to are v2.
 
-            datas[str(name)] = sql
-            #f.writelines("%i,%f,%f,%f,%f,%f,%f,%f,%s\n"%(len(name),error,elavg,elstd,vdwavg,
-            #                                             vdwstd,totavg,totstd,name))
+    """
 
-        for rank, (length, name) in enumerate(reversed(sorted(ranking))):
-            sqlr = datas[name]
-            sqlr.set_rank(rank)
-            data_storage.store(sqlr)
-        data_storage.flush()
-        #f.close()
-        #f = open(filebasename+".pkl", 'wb')
-        #pickle.dump(pickle_dic, f)
-        #f.close()
-        #f = open(filebasename+"_co2dist.pkl", 'wb')
-        #pickle.dump(co2_dist_dic, f)
-        #f.close()
+    # v2 = transformed, v1 = neutral
+    ua = np.array([np.mean(v1.T[0]), np.mean(v1.T[1]), np.mean(v1.T[2])])
+    ub = np.array([np.mean(v2.T[0]), np.mean(v2.T[1]), np.mean(v2.T[2])])
+
+    Covar = np.dot((v2 - ub).T, (v1 - ua))
+
+    u, s, v = np.linalg.svd(Covar)
+    uv = np.dot(u,v)
+    d = np.identity(3) 
+    d[2,2] = np.linalg.det(uv) # ensures non-reflected solution
+    M = np.dot(np.dot(u,d), v)
+    R = np.identity(4)
+    R[:3,:3] = M
+    if point is not None:
+        R[:3,:3] = point - np.dot(M, point)
+    return R
+
