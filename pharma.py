@@ -21,18 +21,6 @@ from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSite
 from sql_backend import SQL_Adsorbophore, SQL_AdsorbophoreSite, SQL_AdsorbophoreSiteIndices
 #Data analysis stuff
 from post_processing import Fastmc_run, PairDistFn
-ANGS2BOHR = 1.889725989
-ATOMIC_NUMBER = [
-    "ZERO", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
-    "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn",
-    "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb",
-    "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
-    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
-    "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta",
-    "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At",
-    "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
-    "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
-    "Ds", "Rg", "Cn", "Uut", "Uuq", "Uup", "Uuh", "Uuo"]
 
 class MOFDiscovery(object):
     def __init__(self, directory):
@@ -314,10 +302,8 @@ class Pharmacophore(object):
         if not nodes:
             return [], []
 
-        g1_dist = np.delete(disti, nodesi, axis=1)
-        g1_dist = np.delete(g1_dist, nodesi, axis=0)
-        g2_dist = np.delete(distj, nodesj, axis=1)
-        g2_dist = np.delete(g2_dist, nodesj, axis=0)
+        g1_dist = disti[nodesi,:][:,nodesi]
+        g2_dist = distj[nodesj,:][:,nodesj]
         adj_matrix = mcqd.correspondence_edges(nodes,
                                                g1_dist, 
                                                g2_dist,
@@ -535,7 +521,6 @@ class Pharmacophore(object):
         return pharma_sites
         #return self._active_sites.values(), self._active_sites.keys() 
 
-
     def store_adsorbophores(self, adsorbophores):
         """Store the raw form of the adsorbophores - which active_sites are contained,
         which indices of the active sites are included.
@@ -561,34 +546,9 @@ class Pharmacophore(object):
             for id, nn in enumerate(name):
                 peanut = SQL_AdsorbophoreSite(rank, nn)
                 data_storage.store(peanut)
-                for site_index in [jj[id] for jj in vals]:
-                    butter = SQL_AdsorbophoreSiteIndices(nn, site_index)
+                for order, site_index in enumerate([jj[id] for jj in vals]):
+                    butter = SQL_AdsorbophoreSiteIndices(nn, order, site_index)
                     data_storage.store(butter)
             data_storage.flush()
 
-
-
-def rotation_from_vectors(v1, v2, point=None):
-    """Obtain rotation matrix from sets of vectors.
-    the original set is v1 and the vectors to rotate
-    to are v2.
-
-    """
-
-    # v2 = transformed, v1 = neutral
-    ua = np.array([np.mean(v1.T[0]), np.mean(v1.T[1]), np.mean(v1.T[2])])
-    ub = np.array([np.mean(v2.T[0]), np.mean(v2.T[1]), np.mean(v2.T[2])])
-
-    Covar = np.dot((v2 - ub).T, (v1 - ua))
-
-    u, s, v = np.linalg.svd(Covar)
-    uv = np.dot(u,v)
-    d = np.identity(3) 
-    d[2,2] = np.linalg.det(uv) # ensures non-reflected solution
-    M = np.dot(np.dot(u,d), v)
-    R = np.identity(4)
-    R[:3,:3] = M
-    if point is not None:
-        R[:3,:3] = point - np.dot(M, point)
-    return R
 
