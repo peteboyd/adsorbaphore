@@ -250,6 +250,9 @@ class PostRun(object):
         ads = self.adsorbophore_db.get_adsorbophore(rank)
         return ads
 
+    def active_site_from_sql(self, name):
+        return self.active_sites_db.get_active_site(name)
+
     def centre_of_atoms(self, coords):
         return np.average(coords, axis=0)
 
@@ -260,7 +263,7 @@ class PostRun(object):
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        base_site = self.active_site_from_sql(base_ads.name)
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
         base_coords -= self.centre_of_atoms(base_coords)
@@ -273,7 +276,7 @@ class PostRun(object):
 
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_sit = self.active_site_from_sql(site.name)
             act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
             #act_elements = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
             act_coords -= self.centre_of_atoms(act_coords)
@@ -343,7 +346,7 @@ class PostRun(object):
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        base_site = self.active_site_from_sql(base_ads.name)
         base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
@@ -368,7 +371,7 @@ class PostRun(object):
 
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_sit = self.active_site_from_sql(site.name)
             act_elem = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
             act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
             act_charges = np.array([act_sit.atoms[j].charge for j in indices])
@@ -431,7 +434,7 @@ class PostRun(object):
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_sites_db.get_active_site(base_ads.name)
+        base_site = self.active_site_from_sql(base_ads.name)
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
         base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
@@ -449,7 +452,7 @@ class PostRun(object):
 
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_sites_db.get_active_site(site.name)
+            act_sit = self.active_site_from_sql(site.name)
             act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
 
             site_eng = act_sit.vdweng + act_sit.eleng
@@ -555,14 +558,84 @@ class PostRun(object):
                     break
             str += "\n"
         return str
-    
+  
+    def min_img(self, mof, coord, sc, ignore):
+        multiplier = reduce(operator.mul, sc, 1)
+        size = len(mof.atoms)
+        coordinates = np.empty((size*multiplier-len(ignore), 3), dtype=np.float)
+        original_indcies = np.empty(size*multiplier-len(ignore), dtype=np.int)
+        # shift by the median supercell - this is so that the binding sites
+        # are covered on all sides
+        box_shift = np.rint(np.median(np.array([(0,0,0), [k-1 for k in sc]]), axis=0))
+        supercells = list(itertools.product(*[itertools.product(range(j)) for j in sc]))
+        inv_cell = mof.cell.inverse
+        cell = mof.cell.cell
+        fcoord = np.dot(inv_cell, coord)
+        fposes = []
+        for id, atom in enumerate(mof.atoms):
+            fpos = atom.fpos(inv_cell)
+            for mult, box in enumerate(supercells):
+                if (id in ignore) and (box == ((0,),(0,),(0,))):
+                    pass
+                else:
+                    b = np.array([b[0] for b in box], dtype=np.float) - box_shift
+                    coordinates[id + mult*size] = fpos + np.around(fcoord-fpos) + b
+                    original_indices[id + mult*size] = id
+        return original_indices, np.dot(coordinates, cell)
+
+    def get_rdfs(self, rank):
+        """Return the radial distribution functions of the cliques in the original MOFs,
+        with the cliques cut-out."""
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        nconfig = 0 # configurations counted
+        nparticles = {} # number of particles counted 
+        distances = {} # keep distances in lists.
+        densities = {} 
+        for site in adsorbophore.active_sites:
+            indices = [i.index for i in site.indices]
+            act_site = self.active_site_from_sql(site.name)
+            ads_atoms = [act_site.atoms[i] for i in indices] 
+            site_eng = act_site.vdweng + act_site.eleng
+            local_data = {}
+            if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
+                mofpath = act_site.mofpath 
+                # get mof from cif
+                mofname = os.path.split(mofpath)[-1][:-4]
+                mof = Structure(mofname)
+                mof.from_cif(mofpath)
+                # get atoms to cut out of mof
+                cut_inds = [atom.mof_id for atom in ads_atoms]
+                # get co2
+                co2 = self.return_co2_array(act_site)
+                rdf_centre = co2[0] # or self.centre_of_atoms(np.array([np.array([a.x, a.y, a.z]) for a in ads_atoms]))
+                # compute the minimum image convention of a supercell around the rdf centre.
+                # cut out the atoms in the active site SQL_ActiveSiteAtoms.mof_id
+                original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
+                dists = distance.cdist(rdf_centre, coordinates)
+                nconfig += 1
+                for (x,y), val in np.ndenumerate(dists):
+                    orig_ind = original_indices[y]
+                    element = mof.atoms[orig_ind].type
+                    distances.setdefault(element, []).append(val)
+                    nparticles.setdefault(element, 0)
+                    nparticles[element] += 1
+                    local_data.setdefault(element, 0)
+                    local_data[element] += 1
+            
+            for el, val in local_data.items():
+                densities.setdefault(el, []).append(val/mof.cell.volume*27)
+        
+        # compute RDFs by atom type? element? general?
+        for element, dis in distances.items():
+            rho = np.mean(densities[element])
+
     def print_stats(self, rank):
 
         error = self.obtain_error(rank)
         adsorbophore = self.adsorbophore_from_sql(rank)
         vdw, el = [],[]
         for active_site in adsorbophore.active_sites:
-            act_site = self.active_sites_db.get_active_site(active_site.name)
+            act_site = self.active_site_from_sql(active_site.name)
             vdw.append(act_site.vdweng)
             el.append(act_site.eleng)
 
