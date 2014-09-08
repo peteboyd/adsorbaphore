@@ -166,8 +166,8 @@ def add_to_pharmacophore(mof, pharma, path, options, energy_min, energy_max):
                 if (el + vdw) >= energy_min and (el + vdw) <= energy_max:
                     coords = np.array([site[i] for i in ['C', 'O1', 'O2']])
                     indices, acoords = pharma.get_active_site(coords, mof_coordinates)
-                    # shift by C in CO2
-                    acoords -= coords[0]
+                    # DO NOT shift by C in CO2
+                    #acoords -= coords[0]
                     active_site, dmatrix = convert_to_active_site(mof, indices, original_indices, acoords)
                     pharma.store_active_site(active_site, dmatrix, 
                                              name="%s.%i"%(mof.name, site_count),
@@ -175,7 +175,7 @@ def add_to_pharmacophore(mof, pharma, path, options, energy_min, energy_max):
                                              el_energy=el,
                                              vdw_energy=vdw)
                     # shift the co2 pos so the carbon is at the origin
-                    pharma.store_co2_pos(coords-coords[0],
+                    pharma.store_co2_pos(coords,#-coords[0],
                                          name="%s.%i"%(mof.name, site_count))
             except KeyError:
                 print "Error, could not find the binding site energies for " + \
