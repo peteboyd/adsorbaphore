@@ -259,7 +259,7 @@ class Pharmacophore(object):
                 sub_idx.append(y)
                 coords.append(mof_coordinates[y])
         sub_idx = list(set(sub_idx))
-        return sub_idx, np.array[mof_coordinates[i] for i in sub_idx]
+        return sub_idx, np.array([mof_coordinates[i] for i in sub_idx])
 
     def store_active_site(self, activesite, dmatrix, name='Default', mof_path="./", el_energy=0., vdw_energy=0.):
         """(ind, x, y, z, element, [mofind], charge)"""
@@ -304,15 +304,15 @@ class Pharmacophore(object):
 
         g1_coords = [asi[i][1:4] for i in nodesi]
         g2_coords = [asj[i][1:4] for i in nodesj]
-        f1 = open('debug_n1.xyz', 'w')
-        f2 = open('debug_n2.xyz', 'w')
+        #f1 = open('debug_n1.xyz', 'w')
+        #f2 = open('debug_n2.xyz', 'w')
 
-        f1.writelines("%i\nfirst\n"%(len(g1_coords)))
-        for a,c in zip(g1_elem, g1_coords):
-            f1.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
-        f2.writelines("%i\nsecond\n"%(len(g1_coords)))
-        for a,c in zip(g2_elem, g2_coords):
-            f2.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
+        #f1.writelines("%i\nfirst\n"%(len(g1_coords)))
+        #for a,c in zip(g1_elem, g1_coords):
+        #    f1.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
+        #f2.writelines("%i\nsecond\n"%(len(g2_coords)))
+        #for a,c in zip(g2_elem, g2_coords):
+        #    f2.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
 
         g1_dist = disti[nodesi,:][:,nodesi]
         g2_dist = distj[nodesj,:][:,nodesj]
@@ -322,19 +322,19 @@ class Pharmacophore(object):
                                                self.tol)
         size = len(nodes)
         clique = mcqd.maxclique(adj_matrix, size)
-        f1.writelines("%i\nfirst\n"%(len(clique)))
-        for k in [nodes[i][0] for i in clique]:
-            a = g1_elem[k]
-            c = g1_coords[k]
-            f1.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
-        f2.writelines("%i\nsecond\n"%(len((clique))))
-        for k in [nodes[i][1] for i in clique]:
-            a = g2_elem[k]
-            c = g2_coords[k]
-            f2.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
-        f1.close()
-        f2.close()
-        sys.exit()
+        #f1.writelines("%i\nfirst\n"%(len(clique)))
+        #for k in [nodes[i][0] for i in clique]:
+        #    a = g1_elem[k]
+        #    c = g1_coords[k]
+        #    f1.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
+        #f2.writelines("%i\nsecond\n"%(len((clique))))
+        #for k in [nodes[i][1] for i in clique]:
+        #    a = g2_elem[k]
+        #    c = g2_coords[k]
+        #    f2.writelines("%s %6.3f %6.3f %6.3f\n"%(a, c[0], c[1], c[2]))
+        #f1.close()
+        #f2.close()
+        #sys.exit()
         if not clique:
             return [],[]
         else:
