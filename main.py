@@ -238,6 +238,7 @@ def main_pharma(options):
 def post_run(options):
     post = PostRun(options)
     post.obtain_co2_distribution(options.rank)
+    post.obtain_total_energy_distribution(options.rank)
     post.print_stats(options.rank)
 
 if __name__ == "__main__":

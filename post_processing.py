@@ -329,6 +329,7 @@ class PostRun(object):
         return vdw*4.184, el*4.184
 
     def obtain_total_energy_distribution(self, rank):
+        ngridx, ngridy, ngridz = [self.options.num_gridpoints]*3
         gride = np.zeros((ngridx, ngridy, ngridz))
         gridecount = np.ones((ngridx, ngridy, ngridz))
         _2radii = self.options.radii*2. + 2.
@@ -383,9 +384,9 @@ class PostRun(object):
 
                 co2 = self.return_co2_array(act_sit)
                 co2 -= T
-                co2 = np.dot(R[:3,:3], co2.T).T
                 vdw, el = self.obtain_co2_fragment_energies(act_elem, act_coords,
                         act_charges, struct.cell.cell, co2)
+                co2 = np.dot(R[:3,:3], co2.T).T
                 inds = self.get_grid_indices((co2+shift_vector), (nx, ny, nz))
                 self.increment_grid(gride, inds[0], en=vdw+el)
                 self.increment_grid(gridecount, inds[0]) 
@@ -396,8 +397,6 @@ class PostRun(object):
         ecube = open('rank%i_TOTEN.cube'%(rank), 'w')
         ecube.writelines(string_gride)
         ecube.close()
-
-
     
     def obtain_split_energy_distribution(self, rank):
         gridevdw = np.zeros((ngridx, ngridy, ngridz))
