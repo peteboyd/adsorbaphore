@@ -6,8 +6,14 @@ import subprocess
 from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
 from sql_backend import SQL_Adsorbophore, SQL_AdsorbophoreSite, SQL_AdsorbophoreSiteIndices
 from math import pi
+from scipy.spatial import distance
+import operator
+import itertools
 import os
 import sys
+sys.path[:0] = ["/home/pboyd/codes_in_development/topcryst"]
+from CSV import CSV
+
 ANGS2BOHR = 1.889725989
 ATOMIC_NUMBER = [
     "ZERO", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
@@ -562,8 +568,8 @@ class PostRun(object):
     def min_img(self, mof, coord, sc, ignore):
         multiplier = reduce(operator.mul, sc, 1)
         size = len(mof.atoms)
-        coordinates = np.empty((size*multiplier-len(ignore), 3), dtype=np.float)
-        original_indcies = np.empty(size*multiplier-len(ignore), dtype=np.int)
+        coordinates = np.empty((size*multiplier, 3), dtype=np.float)
+        original_indices = np.empty(size*multiplier, dtype=np.int)
         # shift by the median supercell - this is so that the binding sites
         # are covered on all sides
         box_shift = np.rint(np.median(np.array([(0,0,0), [k-1 for k in sc]]), axis=0))
@@ -571,21 +577,24 @@ class PostRun(object):
         inv_cell = mof.cell.inverse
         cell = mof.cell.cell
         fcoord = np.dot(inv_cell, coord)
-        fposes = []
+        delete = []
         for id, atom in enumerate(mof.atoms):
             fpos = atom.fpos(inv_cell)
             for mult, box in enumerate(supercells):
                 if (id in ignore) and (box == ((0,),(0,),(0,))):
-                    pass
+                    delete.append(id + mult*size)
                 else:
                     b = np.array([b[0] for b in box], dtype=np.float) - box_shift
                     coordinates[id + mult*size] = fpos + np.around(fcoord-fpos) + b
                     original_indices[id + mult*size] = id
+        original_indices = np.delete(original_indices, delete)
+        coordinates = np.delete(coordinates, delete, axis=0)
         return original_indices, np.dot(coordinates, cell)
 
-    def get_rdfs(self, rank):
+    def obtain_rdfs(self, rank):
         """Return the radial distribution functions of the cliques in the original MOFs,
         with the cliques cut-out."""
+
         adsorbophore = self.adsorbophore_from_sql(rank)
         nconfig = 0 # configurations counted
         nparticles = {} # number of particles counted 
@@ -611,7 +620,7 @@ class PostRun(object):
                 # compute the minimum image convention of a supercell around the rdf centre.
                 # cut out the atoms in the active site SQL_ActiveSiteAtoms.mof_id
                 original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
-                dists = distance.cdist(rdf_centre, coordinates)
+                dists = distance.cdist(np.column_stack(rdf_centre), coordinates)
                 nconfig += 1
                 for (x,y), val in np.ndenumerate(dists):
                     orig_ind = original_indices[y]
@@ -628,6 +637,21 @@ class PostRun(object):
         # compute RDFs by atom type? element? general?
         for element, dis in distances.items():
             rho = np.mean(densities[element])
+            hist, bin_edges = np.histogram(dis, bins=self.options.rdf_bins, 
+                                            range=(0., self.options.rdf_dist))
+            dr = np.diff(bin_edges)[0]
+            
+            norm = 2.* pi * dr * rho * float(nparticles[element])/float(nconfig) \
+                    * float(nconfig)
+            rdf = [hist[i]/norm/(((float(i) - 0.5)*dr)**2 + dr**2/12.)
+                    for i in range(self.options.rdf_bins)]
+
+            csv = CSV("RDF_rank%i_%s"%(rank, element))
+            csv.set_headings("r", "g(r)")
+            for i, val in enumerate(rdf):
+                csv.add_data(**{"r.1":i*dr, "g(r).1":val})
+            csv.write()
+
 
     def print_stats(self, rank):
 
