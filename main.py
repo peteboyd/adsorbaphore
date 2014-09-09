@@ -129,10 +129,21 @@ class CommandLine(object):
                           type="int",
                           default=70,
                           dest="num_gridpoints",
-                          help="If post processing is turned ON (by setting --rank != 0) this will tell the program "+
-                          "to write the probability files with this number of gridpoints in the "+
-                          "x, y, and z dimensions. The size of the box is roughly 2*RADII. "+
+                          help="Write the probability files with this number of gridpoints in the "+
+                          "x, y, and z dimensions. The length of a side of the box is roughly 2*RADII. "+
                           "Default is 70 (ie. a box with 70x70x70 gridpoints).")
+        postgroup.add_option("--rdf_bins", action="store",
+                          type="int",
+                          default=80,
+                          dest="rdf_bins",
+                          help="If post processing is turned ON (by setting --rank != 0) this will tell the program "+
+                          "to bin the distance data into this many values. Default is 80.")
+        postgroup.add_option("--rdf_dist", action="store",
+                          type="float",
+                          default=12.0,
+                          dest="rdf_dist",
+                          help="Set the maximum distance to calculate RDFs with. Default is 12 Angstroms")
+
         parser.add_option_group(postgroup)
         (local_options, local_args) = parser.parse_args()
         self.options = local_options
@@ -237,8 +248,9 @@ def main_pharma(options):
 
 def post_run(options):
     post = PostRun(options)
-    post.obtain_co2_distribution(options.rank)
-    post.obtain_total_energy_distribution(options.rank)
+    #post.obtain_co2_distribution(options.rank)
+    #post.obtain_total_energy_distribution(options.rank)
+    post.obtain_rdfs(options.rank)
     post.print_stats(options.rank)
 
 if __name__ == "__main__":
