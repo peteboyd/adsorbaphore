@@ -644,25 +644,26 @@ class PostRun(object):
                 # compute the minimum image convention of a supercell around the rdf centre.
                 # cut out the atoms in the active site SQL_ActiveSiteAtoms.mof_id
 
-
-                original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
-                dists = distance.cdist(np.column_stack(rdf_centre), coordinates)
-                # debug
-                #f = open('debug.xyz', 'a')
-                #f.writelines("%i\n%s\n"%(len(coordinates)+1, "test"))
-                #for id, coord in enumerate(coordinates):
-                #    orig_ind = original_indices[id]
-                #    element = mof.atoms[orig_ind].type
-                #    f.writelines("%s %9.5f %9.5f %9.5f\n"%(element, coord[0], coord[1], coord[2]))
-                #f.writelines("%s %9.5f %9.5f %9.5f\n"%("As", rdf_centre[0], rdf_centre[1], rdf_centre[2]))
-                #f.close()
-                nconfig += 1
-                for (x,y), val in np.ndenumerate(dists):
-                    orig_ind = original_indices[y]
-                    element = mof.atoms[orig_ind].uff_type
-                    distances.setdefault(element, []).append(val)
-                    nparticles.setdefault(element, 0)
-                    nparticles[element] += 1
+                for atom in ads_atoms:
+                    rdf_centre = np.array([atom.x, atom.y, atom.z])
+                    original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
+                    dists = distance.cdist(np.column_stack(rdf_centre), coordinates)
+                    # debug
+                    #f = open('debug.xyz', 'a')
+                    #f.writelines("%i\n%s\n"%(len(coordinates)+1, "test"))
+                    #for id, coord in enumerate(coordinates):
+                    #    orig_ind = original_indices[id]
+                    #    element = mof.atoms[orig_ind].type
+                    #    f.writelines("%s %9.5f %9.5f %9.5f\n"%(element, coord[0], coord[1], coord[2]))
+                    #f.writelines("%s %9.5f %9.5f %9.5f\n"%("As", rdf_centre[0], rdf_centre[1], rdf_centre[2]))
+                    #f.close()
+                    nconfig += 1
+                    for (x,y), val in np.ndenumerate(dists):
+                        orig_ind = original_indices[y]
+                        element = mof.atoms[orig_ind].uff_type
+                        distances.setdefault(element, []).append(val)
+                        nparticles.setdefault(element, 0)
+                        nparticles[element] += 1
            
                 # add number densities from unit cell.
                 counts = {}
