@@ -5,7 +5,7 @@ from faps import Structure, Atom, Cell, mk_gcmc_control, Guest
 import subprocess
 from sql_backend import Data_Storage, SQL_Pharma, SQL_ActiveSite, SQL_ActiveSiteAtoms, SQL_Distances, SQL_ActiveSiteCO2
 from sql_backend import SQL_Adsorbophore, SQL_AdsorbophoreSite, SQL_AdsorbophoreSiteIndices
-from math import pi
+from math import pi, pow
 from scipy.spatial import distance
 import operator
 import itertools
@@ -263,13 +263,18 @@ class PostRun(object):
         return np.average(coords, axis=0)
 
     def obtain_error(self, rank, debug_ind=0):
-        adsorbophore = self.adsorbophore_from_sql(rank)
+        #adsorbophore = self.adsorbophore_from_sql(rank)
         # get the first adsorbophore as the representative one for the adsorbophore
+        try:
+            adsorbophore = self._adsorbophores[0]
+        except AttributeError:
+            adsorbophore = self.adsorbophore_from_sql(rank)
         base_ads = adsorbophore.active_sites[0]
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_site_from_sql(base_ads.name)
+        #base_site = self.active_site_from_sql(base_ads.name)
+        base_site = self._active_sites[0]
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
         base_coords -= self.centre_of_atoms(base_coords)
@@ -279,22 +284,32 @@ class PostRun(object):
         #f.writelines("%i\nbase\n"%(len(base_elements)))
         #for atom, coord in zip(base_elements, base_coords):
         #    f.writelines("%s %6.3f %6.3f %6.3f\n"%(atom, coord[0], coord[1], coord[2]))
-
+        vdw, el = [], []
+        ads_count = 1
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_site_from_sql(site.name)
-            act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
-            #act_elements = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
-            act_coords -= self.centre_of_atoms(act_coords)
-            R = rotation_from_vectors(act_coords[:], base_coords[:])
-            act_coords = np.dot(R[:3,:3], act_coords.T).T
-            #f.writelines("%i\nother\n"%(len(act_elements)))
-            #for atom, coord in zip(act_elements, act_coords):
-            #    f.writelines("%s %6.3f %6.3f %6.3f\n"%(atom, coord[0], coord[1], coord[2]))
-            for p, q in zip(base_coords, act_coords):
-                mean_errors.append((p-q)**2)
+            try:
+                act_sit = self._active_sites[ads_count]
+            except AttributeError:
+                act_sit = self.active_site_from_sql(site.name)
+            assert act_sit.name == site.name
+            toten = act_sit.vdweng + act_sit.eleng
+            ads_count += 1
+            if (toten >= self.options.en_min) and (toten <= self.options.en_max):
+                act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
+                #act_elements = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
+                act_coords -= self.centre_of_atoms(act_coords)
+                R = rotation_from_vectors(act_coords[:], base_coords[:])
+                act_coords = np.dot(R[:3,:3], act_coords.T).T
+                vdw.append(act_sit.vdweng)
+                el.append(act_sit.eleng)
+                #f.writelines("%i\nother\n"%(len(act_elements)))
+                #for atom, coord in zip(act_elements, act_coords):
+                #    f.writelines("%s %6.3f %6.3f %6.3f\n"%(atom, coord[0], coord[1], coord[2]))
+                for p, q in zip(base_coords, act_coords):
+                    mean_errors.append((p-q)**2)
         #f.close()
-        return np.sqrt(np.mean(mean_errors))
+        return np.sqrt(np.mean(mean_errors)), np.mean(vdw), np.std(vdw), np.mean(el), np.std(el)
 
     def get_grid_indices(self, coord, (nx, ny, nz)):
         vect = coord / np.array([nx, ny, nz])[:, None]
@@ -346,13 +361,15 @@ class PostRun(object):
         shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         
-        adsorbophore = self.adsorbophore_from_sql(rank)
+        #adsorbophore = self.adsorbophore_from_sql(rank)
+        adsorbophore = self._adsorbophores[0]
         # get the first adsorbophore as the representative one for the adsorbophore
         base_ads = adsorbophore.active_sites[0]
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_site_from_sql(base_ads.name)
+        #base_site = self.active_site_from_sql(base_ads.name)
+        base_site = self._active_sites[0]
         base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
@@ -374,14 +391,17 @@ class PostRun(object):
             self.increment_grid(gride, inds[0], en=vdw+el)
             self.increment_grid(gridecount, inds[0]) 
             size += 1
-
+        ads_count = 1
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_site_from_sql(site.name)
+            #act_sit = self.active_site_from_sql(site.name)
+            act_sit = self._active_sites[ads_count]
+            assert act_sit.name == site.name
             act_elem = [act_sit.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
             act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
             act_charges = np.array([act_sit.atoms[j].charge for j in indices])
             site_eng = act_sit.vdweng + act_sit.eleng
+            ads_count += 1
             if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
                 mofname = os.path.split(act_sit.mofpath)[-1][:-3]
                 struct = Structure(mofname)
@@ -434,13 +454,15 @@ class PostRun(object):
         shift_vector = np.array([_2radii/2., _2radii/2., _2radii/2.])
         nx, ny, nz = _2radii/float(ngridx), _2radii/float(ngridy), _2radii/float(ngridz)
         
-        adsorbophore = self.adsorbophore_from_sql(rank)
+        #adsorbophore = self.adsorbophore_from_sql(rank)
+        adsorbophore = self._adsorbophores[0]
         # get the first adsorbophore as the representative one for the adsorbophore
         base_ads = adsorbophore.active_sites[0]
         # get the indices for the adsorbophore
         indices = [i.index for i in base_ads.indices]
         # obtain the original active site from the MOF
-        base_site = self.active_site_from_sql(base_ads.name)
+        #base_site = self.active_site_from_sql(base_ads.name)
+        base_site = self._active_sites[0]
         # get the coordinates of the relevant atoms from the active site
         base_coords = np.array([[base_site.atoms[j].x, base_site.atoms[j].y, base_site.atoms[j].z] for j in indices])
         base_elem = [base_site.atoms[i].elem.encode('ascii', 'ignore') for i in indices]
@@ -456,13 +478,16 @@ class PostRun(object):
             self.increment_grid(grido, inds[1:])
             size += 1
 
+        ads_count = 1
         for site in adsorbophore.active_sites[1:]:
             indices = [i.index for i in site.indices]
-            act_sit = self.active_site_from_sql(site.name)
+            #act_sit = self.active_site_from_sql(site.name)
+            act_sit = self._active_sites[ads_count]
+            assert site.name == act_sit.name
             act_coords = np.array([[act_sit.atoms[j].x, act_sit.atoms[j].y, act_sit.atoms[j].z] for j in indices])
 
             site_eng = act_sit.vdweng + act_sit.eleng
-
+            ads_count += 1
             if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
                 T = self.centre_of_atoms(act_coords)
                 act_coords -= T 
@@ -605,7 +630,6 @@ class PostRun(object):
             act_site = self.active_site_from_sql(site.name)
             ads_atoms = [act_site.atoms[i] for i in indices] 
             site_eng = act_site.vdweng + act_site.eleng
-            local_data = {}
             if site_eng <= self.options.en_max and site_eng >= self.options.en_min:
                 mofpath = act_site.mofpath 
                 # get mof from cif
@@ -619,20 +643,34 @@ class PostRun(object):
                 rdf_centre = co2[0] # or self.centre_of_atoms(np.array([np.array([a.x, a.y, a.z]) for a in ads_atoms]))
                 # compute the minimum image convention of a supercell around the rdf centre.
                 # cut out the atoms in the active site SQL_ActiveSiteAtoms.mof_id
+
+
                 original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
                 dists = distance.cdist(np.column_stack(rdf_centre), coordinates)
+                # debug
+                #f = open('debug.xyz', 'a')
+                #f.writelines("%i\n%s\n"%(len(coordinates)+1, "test"))
+                #for id, coord in enumerate(coordinates):
+                #    orig_ind = original_indices[id]
+                #    element = mof.atoms[orig_ind].type
+                #    f.writelines("%s %9.5f %9.5f %9.5f\n"%(element, coord[0], coord[1], coord[2]))
+                #f.writelines("%s %9.5f %9.5f %9.5f\n"%("As", rdf_centre[0], rdf_centre[1], rdf_centre[2]))
+                #f.close()
                 nconfig += 1
                 for (x,y), val in np.ndenumerate(dists):
                     orig_ind = original_indices[y]
-                    element = mof.atoms[orig_ind].type
+                    element = mof.atoms[orig_ind].uff_type
                     distances.setdefault(element, []).append(val)
                     nparticles.setdefault(element, 0)
                     nparticles[element] += 1
-                    local_data.setdefault(element, 0)
-                    local_data[element] += 1
-            
-            for el, val in local_data.items():
-                densities.setdefault(el, []).append(val/mof.cell.volume*27)
+           
+                # add number densities from unit cell.
+                counts = {}
+                for atom in mof.atoms:
+                    counts.setdefault(atom.uff_type, 0)
+                    counts[atom.uff_type] += 1
+                for element, count in counts.items():
+                    densities.setdefault(element, []).append(count/mof.cell.volume)
         
         # compute RDFs by atom type? element? general?
         for element, dis in distances.items():
@@ -640,37 +678,77 @@ class PostRun(object):
             hist, bin_edges = np.histogram(dis, bins=self.options.rdf_bins, 
                                             range=(0., self.options.rdf_dist))
             dr = np.diff(bin_edges)[0]
-            
-            norm = 2.* pi * dr * rho * float(nparticles[element])/float(nconfig) \
-                    * float(nconfig)
-            rdf = [hist[i]/norm/(((float(i) - 0.5)*dr)**2 + dr**2/12.)
+
+            norm = rho * float(nconfig)
+            #shell_volume = 4/3*pi*pow(r, 2)*dr
+            #rho, norm = 1., 1.
+            rdf = [hist[i]/norm/(4./3.*pi*(pow((i+0.5)*dr, 3) - pow((i-0.5)*dr, 3)))
                     for i in range(self.options.rdf_bins)]
 
-            csv = CSV("RDF_rank%i_%s"%(rank, element))
+            Emax = self.options.en_max
+            Emin = self.options.en_min
+            el_name = '.'.join([j for j in element.split('_') if j])
+            csv = CSV("RDF_rank%i_%s_Emax_%0.2f_Emin_%0.2f"%(rank, el_name, Emax, Emin))
             csv.set_headings("r", "g(r)")
             for i, val in enumerate(rdf):
                 csv.add_data(**{"r.1":i*dr, "g(r).1":val})
             csv.write()
 
+    def collect_adsorbophores(self, rank):
+        """Better way to store the adsorbophores from the sql database.
+        Store the rank in memory instead of accessing the db each time."""
+        try:
+            self._adsorbophores
+        except AttributeError:
+            self._adsorbophores = []
+        adsorbophore = self.adsorbophore_from_sql(rank)
+        self._adsorbophores.append(adsorbophore)
+        try:
+            self._active_sites
+        except AttributeError:
+            self._active_sites = []
+        for active_site in adsorbophore.active_sites:
+            self._active_sites.append(self.active_site_from_sql(active_site.name))
 
     def print_stats(self, rank):
 
-        error = self.obtain_error(rank)
-        adsorbophore = self.adsorbophore_from_sql(rank)
-        vdw, el = [],[]
-        for active_site in adsorbophore.active_sites:
-            act_site = self.active_site_from_sql(active_site.name)
-            vdw.append(act_site.vdweng)
-            el.append(act_site.eleng)
-
-        vdw = np.array(vdw)
-        el = np.array(el)
+        error, vdw_mean, vdw_std, el_mean, el_std = self.obtain_error(rank)
+        #adsorbophore = self.adsorbophore_from_sql(rank)
+        site_count = 0
+        for active_site in self._active_sites:# adsorbophore.active_sites:
+            #act_site = self.active_site_from_sql(active_site.name)
+            act_site = active_site
+            toten = act_site.vdweng + act_site.eleng
+            if (toten >= self.options.en_min) and (toten <= self.options.en_max):
+                site_count += 1
         print "DATA for rank %i"%(rank)
         print "============================"
-        print "adsorbophore size : %i"%(len(adsorbophore.active_sites))
-        print "average VDW energy: %12.5f +/- %12.5f"%(np.mean(vdw), np.std(vdw))
-        print "average ELE energy: %12.5f +/- %12.5f"%(np.mean(el), np.std(el))
+        print "adsorbophore size : %i"%(site_count)
+        print "average VDW energy: %12.5f +/- %12.5f"%(vdw_mean, vdw_std)
+        print "average ELE energy: %12.5f +/- %12.5f"%(el_mean, el_std)
         print "RMSD atoms        : %12.5f"%(error)
+
+    def full_report(self):
+        N = self.adsorbophore_db.session.query(SQL_Adsorbophore).count()
+        del self._adsorbophores
+        del self._active_sites
+        csv = CSV('full_report.csv')
+        csv.set_headings("rank","N_sites", "N_unq_MOFs", "rmsd_error", "av_elstat", "stdev_elstat", "av_vdw", "stdev_vdw")
+        for rank in range(N):
+            adsorbophore = self.adsorbophore_from_sql(rank)
+            nsites = len(adsorbophore.active_sites)
+            mofs = {}
+            for site in adsorbophore.active_sites:
+                mofname = '.'.join(site.name.split('.')[:-1])
+                mofs.setdefault(mofname, 0)
+                mofs[mofname] += 1
+            error, vdw_mean, vdw_std, el_mean, el_std = self.obtain_error(rank)
+
+            csv.add_data(**{'rank.1': rank, 'N_sites.1':nsites, 'N_unq_MOFs.1':len(mofs.keys()),
+                'rmsd_error.1':error, 'av_elstat.1':el_mean, 'stdev_elstat.1':el_std,
+                'av_vdw.1':vdw_mean, 'stdev_vdw.1':vdw_std})
+        csv.write()
+
 
 def rotation_from_vectors(v1, v2, point=None):
     """Obtain rotation matrix from sets of vectors.
