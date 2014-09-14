@@ -143,6 +143,12 @@ class CommandLine(object):
                           default=12.0,
                           dest="rdf_dist",
                           help="Set the maximum distance to calculate RDFs with. Default is 12 Angstroms")
+        postgroup.add_option("--full_report", action="store_true",
+                          default=False,
+                          dest="full_report",
+                          help="Request a full report from the adsorbophore calculation. This may take a "+
+                          "while as it computes the rmsd atoms for all the adsorbophores, and access to sql "+
+                          "database is slow (for large runs). Default is False")
 
         parser.add_option_group(postgroup)
         (local_options, local_args) = parser.parse_args()
@@ -248,9 +254,13 @@ def main_pharma(options):
 
 def post_run(options):
     post = PostRun(options)
-    #post.obtain_co2_distribution(options.rank)
+    post.collect_adsorbophores(options.rank)
+    post.obtain_co2_distribution(options.rank)
     #post.obtain_total_energy_distribution(options.rank)
     post.obtain_rdfs(options.rank)
+    if options.full_report:
+        post.full_report()
+
     post.print_stats(options.rank)
 
 if __name__ == "__main__":
