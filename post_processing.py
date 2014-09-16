@@ -606,15 +606,18 @@ class PostRun(object):
         for id, atom in enumerate(mof.atoms):
             fpos = atom.fpos(inv_cell)
             for mult, box in enumerate(supercells):
-                if (id in ignore) and (box == ((0,),(0,),(0,))):
-                    delete.append(id + mult*size)
-                else:
-                    b = np.array([b[0] for b in box], dtype=np.float) - box_shift
-                    coordinates[id + mult*size] = fpos + np.around(fcoord-fpos) + b
-                    original_indices[id + mult*size] = id
+                b = np.array([b[0] for b in box], dtype=np.float) - box_shift
+                coordinates[id + mult*size] = fpos + np.around(fcoord-fpos) + b
+                original_indices[id + mult*size] = id
+        coordinates = np.dot(coordinates, cell)
+        
+        for idx, i in enumerate(coordinates):
+            for j in ignore:
+                if np.allclose(i,j):
+                    delete.append(idx)
         original_indices = np.delete(original_indices, delete)
         coordinates = np.delete(coordinates, delete, axis=0)
-        return original_indices, np.dot(coordinates, cell)
+        return original_indices, coordinates 
 
     def obtain_rdfs(self, rank):
         """Return the radial distribution functions of the cliques in the original MOFs,
@@ -638,6 +641,7 @@ class PostRun(object):
                 mof.from_cif(mofpath)
                 # get atoms to cut out of mof
                 cut_inds = [atom.mof_id for atom in ads_atoms]
+                cut_coords = np.array([np.array((atom.x, atom.y, atom.z)) for atom in ads_atoms])
                 # get co2
                 co2 = self.return_co2_array(act_site)
                 rdf_centre = co2[0] # or self.centre_of_atoms(np.array([np.array([a.x, a.y, a.z]) for a in ads_atoms]))
@@ -646,7 +650,7 @@ class PostRun(object):
 
                 for atom in ads_atoms:
                     rdf_centre = np.array([atom.x, atom.y, atom.z])
-                    original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_inds)
+                    original_indices, coordinates = self.min_img(mof, rdf_centre, (3,3,3), cut_coords)#cut_inds)
                     dists = distance.cdist(np.column_stack(rdf_centre), coordinates)
                     # debug
                     #f = open('debug.xyz', 'a')
@@ -655,7 +659,7 @@ class PostRun(object):
                     #    orig_ind = original_indices[id]
                     #    element = mof.atoms[orig_ind].type
                     #    f.writelines("%s %9.5f %9.5f %9.5f\n"%(element, coord[0], coord[1], coord[2]))
-                    #f.writelines("%s %9.5f %9.5f %9.5f\n"%("As", rdf_centre[0], rdf_centre[1], rdf_centre[2]))
+                    #f.writelines("%s %9.5f %9.5f %9.5f\n"%("As", co2[0][0], co2[0][1], co2[0][2]))
                     #f.close()
                     nconfig += 1
                     for (x,y), val in np.ndenumerate(dists):
